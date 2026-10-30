@@ -1,0 +1,12 @@
+[Unit]
+Description=Discord Boot Notification for Proxmox VE
+After=network-online.target zfs-zed.service pve-cluster.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/discord-boot-notify.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

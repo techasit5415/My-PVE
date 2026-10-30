@@ -1,0 +1,12 @@
+[Unit]
+Description=Set Optimal AMD CPU Governor and EPP
+After=sysinit.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/set-cpu-governor.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

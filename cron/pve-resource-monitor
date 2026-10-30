@@ -1,0 +1,2 @@
+# Check RAM (>90%) and Storage (>85%) every 5 minutes
+*/5 * * * * root /usr/local/bin/pve-resource-monitor.sh > /dev/null 2>&1

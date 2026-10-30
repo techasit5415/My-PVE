@@ -1,0 +1,2 @@
+# Run Proxmox VE Daily Health Check every day at 08:00 AM
+0 8 * * * root /usr/local/bin/discord-disk-report.sh > /dev/null 2>&1

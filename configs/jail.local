@@ -1,0 +1,15 @@
+[DEFAULT]
+# Whitelist private home/management networks so admin never gets locked out
+ignoreip = 127.0.0.1/8 ::1 192.168.100.0/24 192.168.1.0/24 192.168.5.0/24 192.168.69.0/24
+bantime  = 1d
+findtime  = 10m
+maxretry = 5
+
+# Default action is ban via nftables/iptables + send Discord alert
+action = %(action_)s
+         discord-notify
+
+[sshd]
+enabled = true
+port    = ssh
+backend = systemd
