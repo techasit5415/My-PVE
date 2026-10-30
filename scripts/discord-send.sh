@@ -23,7 +23,9 @@ DESCRIPTION=""
 COLOR=3447003 # Default Blue
 FOOTER="$(hostname) • $(date '+%Y-%m-%d %H:%M:%S')"
 CONTENT=""
-declare -a FIELDS=()
+declare -a FIELD_NAMES=()
+declare -a FIELD_VALS=()
+declare -a FIELD_INLINES=()
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -50,9 +52,41 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --field)
-            # format: "Name|Value" or "Name|Value|inline"
-            FIELDS+=("$2")
-            shift 2
+            # Check if 3-arg format: --field "Name" "Value" ["true/false"]
+            if [ $# -ge 3 ] && [[ ! "$3" =~ ^-- ]] && [[ ! "$2" =~ [\|] ]] && [[ ! "$2" =~ ::: ]]; then
+                fname="$2"
+                fval="$3"
+                finline="false"
+                shift 3
+                if [ $# -ge 1 ] && [[ "$1" =~ ^(true|false)$ ]]; then
+                    finline="$1"
+                    shift 1
+                fi
+                FIELD_NAMES+=("$fname")
+                FIELD_VALS+=("$fval")
+                FIELD_INLINES+=("$finline")
+            else
+                # Pipe or triple-colon delimited: "Name:::Value:::inline" or "Name|Value|inline"
+                raw="$2"
+                shift 2
+                if [[ "$raw" =~ ::: ]]; then
+                    IFS=':::' read -r fname fval finline <<< "$raw"
+                else
+                    # Split only on first two pipes to allow pipes inside value
+                    fname="${raw%%|*}"
+                    rest="${raw#*|}"
+                    if [[ "$rest" =~ \|(true|false)$ ]]; then
+                        finline="${rest##*|}"
+                        fval="${rest%|*}"
+                    else
+                        finline="false"
+                        fval="$rest"
+                    fi
+                fi
+                FIELD_NAMES+=("$fname")
+                FIELD_VALS+=("$fval")
+                FIELD_INLINES+=("${finline:-false}")
+            fi
             ;;
         --text|--content)
             CONTENT="$2"
@@ -68,23 +102,31 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Convert any literal \n into real newlines
+DESCRIPTION=$(echo -e "$DESCRIPTION")
+
 # Build JSON payload
 if [ -n "$CONTENT" ] && [ -z "$TITLE" ] && [ -z "$DESCRIPTION" ]; then
     PAYLOAD=$(jq -n \
-        --arg content "$CONTENT" \
+        --arg content "$(echo -e "$CONTENT")" \
         --arg username "$USERNAME" \
         --arg avatar "$AVATAR" \
         '{content: $content, username: $username, avatar_url: $avatar}')
 else
-    # Build fields array
+    # Build fields array safely with jq
     FIELDS_JSON="[]"
-    for f in "${FIELDS[@]}"; do
-        IFS='|' read -r fname fval finline <<< "$f"
-        [ -z "$fname" ] && continue
+    for i in "${!FIELD_NAMES[@]}"; do
+        fn="${FIELD_NAMES[$i]}"
+        fv=$(echo -e "${FIELD_VALS[$i]}")
+        fi_val="${FIELD_INLINES[$i]}"
         is_inline=false
-        [ "$finline" = "true" ] && is_inline=true
-        FIELDS_JSON=$(echo "$FIELDS_JSON" | jq --arg n "$fname" --arg v "$fval" --argjson i "$is_inline" \
-            '. += [{"name": $n, "value": $v, "inline": $i}]')
+        [ "$fi_val" = "true" ] && is_inline=true
+
+        FIELDS_JSON=$(echo "$FIELDS_JSON" | jq \
+            --arg n "$fn" \
+            --arg v "$fv" \
+            --argjson inl "$is_inline" \
+            '. += [{"name": $n, "value": $v, "inline": $inl}]')
     done
 
     EMBED=$(jq -n \
