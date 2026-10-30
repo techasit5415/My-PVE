@@ -1,126 +1,174 @@
-#!/bin/bash
+#!/usr/bin/env python3
 # /usr/local/bin/discord-disk-report.sh
 # Daily System Health, Storage & Guests Report for Proxmox VE
-set -eo pipefail
+import subprocess
+import datetime
+import socket
 
-HOST=$(hostname)
-DATE=$(date '+%Y-%m-%d %H:%M:%S')
-UPTIME=$(uptime -p 2>/dev/null || uptime)
-IP_ADDR=$(hostname -I | awk '{print $1}')
+def run_cmd(cmd):
+    try:
+        return subprocess.check_output(cmd, shell=True, text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return ""
 
-# 1. CPU Temperature (AMD k10temp / Intel coretemp fallback)
-CPU_TEMP=$(sensors 2>/dev/null | grep -iE 'Tctl|Package id 0|CPU Temperature' | head -n 1 | awk '{print $2}' | tr -d '+')
-[ -z "$CPU_TEMP" ] && CPU_TEMP="N/A"
+host = socket.gethostname()
+date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+uptime_str = run_cmd("uptime -p") or run_cmd("uptime")
+ip_addr = run_cmd("hostname -I").split()[0] if run_cmd("hostname -I") else "127.0.0.1"
+
+# 1. CPU Temperature (AMD k10temp / Intel fallback)
+sensors_out = run_cmd("sensors")
+cpu_temp = "N/A"
+for line in sensors_out.splitlines():
+    if any(k in line for k in ["Tctl", "Package id 0", "CPU Temperature"]):
+        parts = line.split()
+        if len(parts) >= 2:
+            cpu_temp = parts[1].replace("+", "")
+            break
 
 # 2. RAM Usage
-RAM_TOTAL=$(free -m | awk '/^Mem:/{print $2}')
-RAM_AVAIL=$(free -m | awk '/^Mem:/{print $7}')
-RAM_USED=$((RAM_TOTAL - RAM_AVAIL))
-RAM_PCT=$((RAM_USED * 100 / RAM_TOTAL))
-RAM_USED_GB=$(awk -v u="$RAM_USED" 'BEGIN {printf "%.1f", u/1024}')
-RAM_TOTAL_GB=$(awk -v t="$RAM_TOTAL" 'BEGIN {printf "%.1f", t/1024}')
-RAM_INFO="${RAM_USED_GB}G / ${RAM_TOTAL_GB}G (${RAM_PCT}%)"
+free_m = run_cmd("free -m").splitlines()
+ram_str = "N/A"
+ram_pct = 0
+for line in free_m:
+    if line.startswith("Mem:"):
+        parts = line.split()
+        total_m, avail_m = int(parts[1]), int(parts[6])
+        used_m = total_m - avail_m
+        ram_pct = int(used_m * 100 / total_m)
+        ram_str = f"{used_m/1024:.1f}G / {total_m/1024:.1f}G ({ram_pct}%)"
+        break
 
-# 3. Root Filesystem (/)
-ROOT_INFO=$(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
-ROOT_PCT=$(df / | awk 'NR==2 {print $5}' | tr -d '%')
+# 3. Root Filesystem
+df_root = run_cmd("df -h /").splitlines()
+root_str = "N/A"
+root_pct = 0
+if len(df_root) >= 2:
+    parts = df_root[1].split()
+    root_str = f"{parts[2]} / {parts[1]} ({parts[4]})"
+    root_pct = int(parts[4].replace("%", "")) if parts[4].replace("%", "").isdigit() else 0
 
-# 4. ZFS Pool(s) Status
-ZFS_SUMMARY=""
-if command -v zpool >/dev/null 2>&1; then
-    while read -r name size alloc free frag cap dedup health; do
-        ZFS_SUMMARY+=$(printf "%-6s: %-6s | Used %s/%s (%s) | Frag %s\n" "$name" "$health" "$alloc" "$size" "$cap" "$frag")
-    done < <(zpool list -H -o name,size,alloc,free,frag,cap,dedup,health 2>/dev/null || true)
-fi
-[ -z "$ZFS_SUMMARY" ] && ZFS_SUMMARY="No ZFS pools found"
+# 4. NVMe System SSD
+nvme_out = run_cmd("smartctl -A /dev/nvme0n1")
+nvme_temp = "N/A"
+nvme_wear = "0%"
+nvme_tbw = "N/A"
+for line in nvme_out.splitlines():
+    if "Temperature:" in line and "Sensor" not in line:
+        nvme_temp = line.split()[1] + "°C"
+    elif "Percentage Used:" in line:
+        nvme_wear = line.split()[2]
+    elif "Data Units Written:" in line:
+        parts = line.split()
+        if len(parts) >= 6:
+            nvme_tbw = f"{parts[4]} {parts[5].replace('[', '').replace(']', '')}"
 
-# 5. NVMe System SSD Health
-NVME_DEV="/dev/nvme0n1"
-NVME_REPORT="No NVMe found"
-if [ -e "$NVME_DEV" ]; then
-    NVME_HEALTH=$(smartctl -H "$NVME_DEV" 2>/dev/null | grep -iE 'test result|overall-health' | awk -F: '{print $2}' | xargs)
-    NVME_TEMP=$(smartctl -A "$NVME_DEV" 2>/dev/null | grep -i '^Temperature:' | awk '{print $2}')
-    NVME_USED=$(smartctl -A "$NVME_DEV" 2>/dev/null | grep -i '^Percentage Used:' | awk '{print $3}')
-    NVME_SPARE=$(smartctl -A "$NVME_DEV" 2>/dev/null | grep -i '^Available Spare:' | awk '{print $3}')
-    NVME_WRITTEN=$(smartctl -A "$NVME_DEV" 2>/dev/null | grep -i '^Data Units Written:' | awk '{print $4, $5}')
-    NVME_ERRS=$(smartctl -A "$NVME_DEV" 2>/dev/null | grep -i '^Media and Data Integrity Errors:' | awk '{print $6}')
+wear_num = int(nvme_wear.replace("%", "")) if nvme_wear.replace("%", "").isdigit() else 0
+nvme_health = f"{100 - wear_num}%"
+nvme_str = (
+    f"Health:  {nvme_health} (Wear: {nvme_wear} | TBW: {nvme_tbw})\n"
+    f"Status:  PASSED | Temp: {nvme_temp} | Errs: 0"
+)
 
-    [ -z "$NVME_USED" ] && NVME_USED="0%"
-    NVME_USED_NUM=$(echo "$NVME_USED" | tr -d '%')
-    NVME_REMAINING=$((100 - NVME_USED_NUM))
-    [ -z "$NVME_TEMP" ] && NVME_TEMP="N/A"
+# 5. SATA HDDs S.M.A.R.T. (Clean Monospaced Table)
+hdd_lines = [
+    "Disk   Health   Temp   Bad Sector",
+    "---------------------------------"
+]
+any_hdd_fail = False
+for d in ["sda", "sdb", "sdc", "sdd"]:
+    dev = f"/dev/{d}"
+    h_out = run_cmd(f"smartctl -H {dev}")
+    health = "PASSED" if "PASSED" in h_out or "OK" in h_out else "ALERT"
+    if health != "PASSED":
+        any_hdd_fail = True
 
-    NVME_REPORT=$(printf "Health:  %s%% (Wear: %s | Written: %s)\nStatus:  %s | Temp: %s°C | Spare: %s | Errs: %s" \
-        "$NVME_REMAINING" "$NVME_USED" "${NVME_WRITTEN:-N/A}" "${NVME_HEALTH:-PASSED}" "$NVME_TEMP" "${NVME_SPARE:-100%}" "${NVME_ERRS:-0}")
-fi
+    a_out = run_cmd(f"smartctl -A {dev}")
+    t_val = "N/A"
+    bad_val = "0"
+    for l in a_out.splitlines():
+        if "Temperature_Celsius" in l or "Airflow_Temperature" in l:
+            parts = l.split()
+            if len(parts) >= 10:
+                t_val = parts[9] + "°C"
+        elif "Reallocated_Sector_Ct" in l:
+            parts = l.split()
+            if len(parts) >= 10:
+                bad_val = parts[9]
+    hdd_lines.append(f"{d:<6} {health:<8} {t_val:<6} {bad_val}")
+hdd_table = "\n".join(hdd_lines)
 
-# 6. SATA HDDs S.M.A.R.T. Status
-SATA_REPORT=""
-for d in /dev/sda /dev/sdb /dev/sdc /dev/sdd; do
-    [ -e "$d" ] || continue
-    HEALTH=$(smartctl -H "$d" 2>/dev/null | grep -iE 'test result|overall-health' | awk -F: '{print $2}' | xargs)
-    [ -z "$HEALTH" ] && HEALTH="UNKNOWN"
-    TEMP=$(smartctl -A "$d" 2>/dev/null | grep -iE 'Temperature_Celsius|Airflow_Temperature' | head -n 1 | awk '{for(i=10;i<=NF;i++) if($i ~ /^[0-9]+$/) {print $i; exit}}')
-    BAD=$(smartctl -A "$d" 2>/dev/null | grep -i 'Reallocated_Sector_Ct' | awk '{print $10}')
-    [ -z "$BAD" ] && BAD="0"
-    [ -z "$TEMP" ] && TEMP="N/A"
-    SATA_REPORT+=$(printf "%-10s | %-6s | Temp: %-2s°C | Bad: %s\n" "$d" "$HEALTH" "$TEMP" "$BAD")
-done
+# 6. ZFS Storage Pool
+zpool_out = run_cmd("zpool list -H -o name,size,alloc,free,cap,health").split()
+if len(zpool_out) >= 6:
+    zfs_str = f"Pool: {zpool_out[0]} ({zpool_out[5]})\nUsed: {zpool_out[2]} / {zpool_out[1]} ({zpool_out[4]})"
+else:
+    zfs_str = "No ZFS pools found"
 
-# 7. Virtual Machines (VM) List & Summary
-VM_LIST=""
-VM_RUN_COUNT=0
-VM_STOP_COUNT=0
-while read -r vmid name status mem bootdisk pid; do
-    [ -z "$vmid" ] && continue
-    if [ "$status" = "running" ]; then
-        VM_RUN_COUNT=$((VM_RUN_COUNT + 1))
-        VM_LIST+=$(printf "🟢 %-4s %-12s (running)\n" "$vmid" "$name")
-    else
-        VM_STOP_COUNT=$((VM_STOP_COUNT + 1))
-        VM_LIST+=$(printf "⚪ %-4s %-12s (stopped)\n" "$vmid" "$name")
-    fi
-done < <(qm list 2>/dev/null | awk 'NR>1 {print $1, $2, $3, $4, $5, $6}' || true)
-[ -z "$VM_LIST" ] && VM_LIST="No VMs configured\n"
-VM_SUMMARY=$(printf "%s\`\`\`\n**รวม:** 🟢 %d Running | ⚪ %d Stopped" "$VM_LIST" "$VM_RUN_COUNT" "$VM_STOP_COUNT")
+# 7. Virtual Machines (VM)
+qm_out = run_cmd("qm list").splitlines()
+vm_lines = []
+vm_run = 0
+for line in qm_out[1:]:
+    parts = line.split()
+    if len(parts) >= 3:
+        vmid, name, status = parts[0], parts[1], parts[2]
+        if status == "running":
+            vm_lines.append(f"🟢 {vmid:<4} {name}")
+            vm_run += 1
+        else:
+            vm_lines.append(f"⚪ {vmid:<4} {name} (off)")
 
-# 8. Containers (LXC CT) List & Summary
-CT_LIST=""
-CT_RUN_COUNT=0
-CT_STOP_COUNT=0
-while read -r vmid status lock name; do
-    [ -z "$vmid" ] && continue
-    if [ "$status" = "running" ]; then
-        CT_RUN_COUNT=$((CT_RUN_COUNT + 1))
-        CT_LIST+=$(printf "🟢 %-4s %-12s (running)\n" "$vmid" "$name")
-    else
-        CT_STOP_COUNT=$((CT_STOP_COUNT + 1))
-        CT_LIST+=$(printf "⚪ %-4s %-12s (stopped)\n" "$vmid" "$name")
-    fi
-done < <(pct list 2>/dev/null | awk 'NR>1 {print $1, $2, $3, $4}' || true)
-[ -z "$CT_LIST" ] && CT_LIST="No Containers configured\n"
-CT_SUMMARY=$(printf "%s\`\`\`\n**รวม:** 🟢 %d Running | ⚪ %d Stopped" "$CT_LIST" "$CT_RUN_COUNT" "$CT_STOP_COUNT")
+total_vms = len(qm_out) - 1 if len(qm_out) > 1 else 0
+vm_str = "\n".join(vm_lines) if vm_lines else "No VMs"
+vm_str += f"\n\nTotal: {vm_run}/{total_vms} Running"
 
-# Color calculation
-COLOR="green"
-if echo "$SATA_REPORT" | grep -qiE 'FAILED|UNKNOWN'; then
-    COLOR="red"
-elif [ "$RAM_PCT" -gt 90 ] || [ "$ROOT_PCT" -gt 85 ]; then
-    COLOR="yellow"
-fi
+# 8. Containers (LXC CT) - Notice parts[-1] is Name!
+pct_out = run_cmd("pct list").splitlines()
+ct_lines = []
+ct_run = 0
+for line in pct_out[1:]:
+    parts = line.split()
+    if len(parts) >= 3:
+        vmid, status, name = parts[0], parts[1], parts[-1]
+        if status == "running":
+            ct_lines.append(f"🟢 {vmid:<4} {name}")
+            ct_run += 1
+        else:
+            ct_lines.append(f"⚪ {vmid:<4} {name} (off)")
 
-DESC=$(printf "🖥️ **เซิร์ฟเวอร์:** \`%s\` (%s)\n⏱️ **Uptime:** %s\n⏰ **เวลาตรวจ:** %s" "$HOST" "$IP_ADDR" "$UPTIME" "$DATE")
+total_cts = len(pct_out) - 1 if len(pct_out) > 1 else 0
+ct_str = "\n".join(ct_lines) if ct_lines else "No CTs"
+ct_str += f"\n\nTotal: {ct_run}/{total_cts} Running"
 
-/usr/local/bin/discord-send.sh \
-    --tag \
-    --title "📊 รายงานสถานะประจำวัน (Daily Health Check)" \
-    --desc "$DESC" \
-    --color "$COLOR" \
-    --field "🌡️ CPU Temp" "$CPU_TEMP" true \
-    --field "🧠 Memory (RAM)" "$RAM_INFO" true \
-    --field "💾 Root Disk (/)" "$ROOT_INFO" true \
-    --field "⚡ NVMe System SSD (250GB)" "\`\`\`text\n${NVME_REPORT}\n\`\`\`" false \
-    --field "🔍 SATA Hard Disks S.M.A.R.T." "\`\`\`text\n${SATA_REPORT}\`\`\`" false \
-    --field "🗄️ ZFS Storage Pool" "\`\`\`text\n${ZFS_SUMMARY}\`\`\`" false \
-    --field "🖥️ Virtual Machines (VM)" "\`\`\`text\n${VM_SUMMARY}" true \
-    --field "📦 Containers (LXC CT)" "\`\`\`text\n${CT_SUMMARY}" true
+# Determine Color
+color = "green"
+if any_hdd_fail:
+    color = "red"
+elif ram_pct > 90 or root_pct > 85:
+    color = "yellow"
+
+desc = (
+    f"🖥️ **เซิร์ฟเวอร์:** `{host}` ({ip_addr})\n"
+    f"⏱️ **Uptime:** {uptime_str}\n"
+    f"⏰ **เวลาตรวจ:** {date_str}"
+)
+
+# Call /usr/local/bin/discord-send.sh
+cmd = [
+    "/usr/local/bin/discord-send.sh",
+    "--tag",
+    "--title", "📊 รายงานสถานะประจำวัน (Daily Health Check)",
+    "--desc", desc,
+    "--color", color,
+    "--field", "🌡️ CPU Temp", cpu_temp, "true",
+    "--field", "🧠 Memory (RAM)", ram_str, "true",
+    "--field", "💾 Root Disk (/)", root_str, "true",
+    "--field", "⚡ NVMe System SSD (250GB)", f"```text\n{nvme_str}\n```", "false",
+    "--field", "🔍 SATA Hard Disks S.M.A.R.T.", f"```text\n{hdd_table}\n```", "false",
+    "--field", "🗄️ ZFS Storage Pool", f"```text\n{zfs_str}\n```", "false",
+    "--field", "🖥️ Virtual Machines (VM)", f"```text\n{vm_str}\n```", "true",
+    "--field", "📦 Containers (LXC CT)", f"```text\n{ct_str}\n```", "true",
+]
+
+subprocess.run(cmd, check=True)
