@@ -112,6 +112,7 @@ fi
 DESC=$(printf "🖥️ **เซิร์ฟเวอร์:** \`%s\` (%s)\n⏱️ **Uptime:** %s\n⏰ **เวลาตรวจ:** %s" "$HOST" "$IP_ADDR" "$UPTIME" "$DATE")
 
 /usr/local/bin/discord-send.sh \
+    --tag \
     --title "📊 รายงานสถานะประจำวัน (Daily Health Check)" \
     --desc "$DESC" \
     --color "$COLOR" \

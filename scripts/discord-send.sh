@@ -12,6 +12,7 @@ fi
 WEBHOOK="${DISCORD_WEBHOOK_URL:-}"
 USERNAME="${DISCORD_USERNAME:-PVE-Monitor}"
 AVATAR="${DISCORD_AVATAR:-}"
+GLOBAL_TAG="${DISCORD_TAG:-}"
 
 if [ -z "$WEBHOOK" ]; then
     echo "ERROR: DISCORD_WEBHOOK_URL is not set in $CONF_FILE" >&2
@@ -23,6 +24,7 @@ DESCRIPTION=""
 COLOR=3447003 # Default Blue
 FOOTER="$(hostname) • $(date '+%Y-%m-%d %H:%M:%S')"
 CONTENT=""
+TAG_USER=""
 declare -a FIELD_NAMES=()
 declare -a FIELD_VALS=()
 declare -a FIELD_INLINES=()
@@ -51,8 +53,16 @@ while [[ $# -gt 0 ]]; do
             esac
             shift 2
             ;;
+        --tag|--mention)
+            if [ -n "$2" ] && [[ ! "$2" =~ ^-- ]]; then
+                TAG_USER="$2"
+                shift 2
+            else
+                TAG_USER="${GLOBAL_TAG:-}"
+                shift 1
+            fi
+            ;;
         --field)
-            # Check if 3-arg format: --field "Name" "Value" ["true/false"]
             if [ $# -ge 3 ] && [[ ! "$3" =~ ^-- ]] && [[ ! "$2" =~ [\|] ]] && [[ ! "$2" =~ ::: ]]; then
                 fname="$2"
                 fval="$3"
@@ -66,13 +76,11 @@ while [[ $# -gt 0 ]]; do
                 FIELD_VALS+=("$fval")
                 FIELD_INLINES+=("$finline")
             else
-                # Pipe or triple-colon delimited: "Name:::Value:::inline" or "Name|Value|inline"
                 raw="$2"
                 shift 2
                 if [[ "$raw" =~ ::: ]]; then
                     IFS=':::' read -r fname fval finline <<< "$raw"
                 else
-                    # Split only on first two pipes to allow pipes inside value
                     fname="${raw%%|*}"
                     rest="${raw#*|}"
                     if [[ "$rest" =~ \|(true|false)$ ]]; then
@@ -105,10 +113,26 @@ done
 # Convert any literal \n into real newlines
 DESCRIPTION=$(echo -e "$DESCRIPTION")
 
+# Format Tag if specified
+FORMATTED_TAG=""
+if [ -n "$TAG_USER" ]; then
+    if [[ "$TAG_USER" == \<@*\> ]]; then
+        FORMATTED_TAG="$TAG_USER"
+    elif [[ "$TAG_USER" =~ ^[0-9]+$ ]]; then
+        FORMATTED_TAG="<@${TAG_USER}>"
+    elif [[ "$TAG_USER" == @* ]]; then
+        FORMATTED_TAG="$TAG_USER"
+    else
+        FORMATTED_TAG="@${TAG_USER}"
+    fi
+fi
+
 # Build JSON payload
 if [ -n "$CONTENT" ] && [ -z "$TITLE" ] && [ -z "$DESCRIPTION" ]; then
+    FINAL_CONTENT="$(echo -e "$CONTENT")"
+    [ -n "$FORMATTED_TAG" ] && FINAL_CONTENT="${FORMATTED_TAG} ${FINAL_CONTENT}"
     PAYLOAD=$(jq -n \
-        --arg content "$(echo -e "$CONTENT")" \
+        --arg content "$FINAL_CONTENT" \
         --arg username "$USERNAME" \
         --arg avatar "$AVATAR" \
         '{content: $content, username: $username, avatar_url: $avatar}')
@@ -147,12 +171,14 @@ else
     PAYLOAD=$(jq -n \
         --arg username "$USERNAME" \
         --arg avatar "$AVATAR" \
+        --arg content "$FORMATTED_TAG" \
         --argjson embed "$EMBED" \
         '{
             username: $username,
             avatar_url: $avatar,
+            content: (if $content != "" then $content else null end),
             embeds: [$embed]
-        }')
+        } | del(.[] | select(. == null))')
 fi
 
 # Send webhook with retry and timeout
