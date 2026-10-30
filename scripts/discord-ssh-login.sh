@@ -31,6 +31,7 @@ echo "$NOW" > "$LOCK_FILE"
     ROOT_SESSIONS=$(who 2>/dev/null | grep -c '^root' || echo "1")
 
     /usr/local/bin/discord-send.sh \
+        --tag \
         --title "🛡️ Security Alert: ตรวจพบการเข้าสู่ระบบ SSH Root" \
         --desc "**แจ้งเตือนความปลอดภัย:** มีการล็อกอินเข้าใช้งานเซิร์ฟเวอร์ด้วยสิทธิ์ \`root\`" \
         --color orange \

@@ -35,6 +35,7 @@ else
 fi
 
 /usr/local/bin/discord-send.sh \
+    --tag \
     --title "$TITLE" \
     --desc "**เซิร์ฟเวอร์:** \`${HOST}\` พบความผิดปกติของดิสก์ กรุณาตรวจสอบทันที!" \
     --color "$COLOR" \
