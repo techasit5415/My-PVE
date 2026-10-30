@@ -6,13 +6,56 @@
 
 ## 🖥️ ข้อมูลฮาร์ดแวร์และระบบ (Server Specifications)
 
-* **Server Hostname:** `pve` (IP: `192.168.100.253`)
+* **Server Hostname:** `pve` (IP: `192.168.100.253` / `192.168.5.253`)
 * **Processor (CPU):** AMD Ryzen 5 4600G with Radeon Graphics (6 Cores / 12 Threads)
-* **Memory (RAM):** 40 GB DDR4 (Kingston 8 GB + 32 GB)
+* **Memory (RAM):** 40 GB DDR4 (Kingston 8 GB + 32 GB @ 2400 MT/s)
 * **System Disk (OS):** 250 GB WD Blue SN580 NVMe SSD (LVM-Thin)
 * **Storage Pool (ZFS):** 4x 2TB Seagate BarraCuda SATA HDD (ZFS Mirror Pool `data` ~ 3.6 TB)
 * **OS / Hypervisor:** Proxmox VE 9.2 (Debian 13 Trixie, Linux Kernel 7.0)
 * **Backup Destination:** Proxmox Backup Server (PBS: `A1` @ `192.168.100.176`, Datastore: `bornzi`)
+* **Discord Mention Target:** `<@370422678009544714>` (`@BornZl`)
+
+---
+
+## 📱 ตัวอย่างข้อความแจ้งเตือนใน Discord (Live Discord Preview)
+
+```text
+@BornZl
+
+📊 รายงานสถานะประจำวัน (Daily Health Check)
+🖥️ เซิร์ฟเวอร์: pve (192.168.5.253)
+⏱️ Uptime: up 1 week, 3 days, 4 hours
+⏰ เวลาตรวจ: 2026-10-30 22:25:56
+
+🌡️ CPU Temp          🧠 Memory (RAM)          💾 Root Disk (/)
+34.0°C                8.4G / 38.9G (21%)       15G / 67G (24%)
+
+⚡ NVMe System SSD (250GB)
+Health:  100% (Wear: 0% | TBW: 2.64 TB)
+Status:  PASSED | Temp: 39°C | Errs: 0
+
+🔍 SATA Hard Disks S.M.A.R.T.
+Disk   Health   Temp   Bad Sector
+---------------------------------
+sda    PASSED   31°C   0
+sdb    PASSED   31°C   0
+sdc    PASSED   33°C   0
+sdd    PASSED   33°C   0
+
+🗄️ ZFS Storage Pool
+Pool: data (ONLINE)
+Used: 131G / 3.62T (3%)
+
+🖥️ Virtual Machines (VM)          📦 Containers (LXC CT)
+🟢 100  opnsense                 🟢 101  nginx-ui
+⚪ 102  Desktop (off)            ⚪ 103  Rathole (off)
+⚪ 9999 csprofdev (off)          🟢 104  minecraft
+                                 🟢 105  cloudreve
+Total: 1/3 Running               🟢 106  openvpn
+                                 🟢 107  hermesagent
+
+                                 Total: 5/6 Running
+```
 
 ---
 
@@ -20,10 +63,10 @@
 
 ### 1. หมวด Critical & Storage (การเฝ้าระวังฮาร์ดแวร์และ ZFS)
 * **S.M.A.R.T. Real-time Alert (`smartd`):**
-  * คอนฟิกใน `/etc/smartd.conf` แยกค่าเกณฑ์ตามประเภทดิสก์:
-    * NVMe OS (`/dev/nvme0n1`): อุณหภูมิแจ้งเตือน 65°C / ฉุกเฉิน 75°C
-    * 4x SATA HDDs (`/dev/sd[a-d]`): ตรวจจับ Bad Sector (`-R 5`), Pending Sector (`-C 197+`), Uncorrectable Sector (`-U 198+`) และอุณหภูมิเกิน 45°C / 55°C
-  * สคริปต์ `/usr/local/bin/smartd-discord.sh` จะยิงการ์ดสีแดงแจ้งเตือนเข้า Discord ทันทีที่ฮาร์ดแวร์มีปัญหา ไม่ต้องรอรอบสรุป
+  * คอนฟิกใน `/etc/smartd.conf` แยกเกณฑ์ตามประเภทดิสก์:
+    * **NVMe OS (`/dev/nvme0n1`):** อุณหภูมิแจ้งเตือน 65°C / ฉุกเฉิน 75°C
+    * **4x SATA HDDs (`/dev/sd[a-d]`):** ตรวจจับ Bad Sector (`-R 5`), Pending Sector (`-C 197+`), Uncorrectable Sector (`-U 198+`) และอุณหภูมิเกิน 45°C / 55°C
+  * สคริปต์ `/usr/local/bin/smartd-discord.sh` จะยิงการ์ดสีแดงแจ้งเตือนพร้อม Mention เข้า Discord ทันทีที่ฮาร์ดแวร์มีปัญหา ไม่ต้องรอรอบสรุป
 * **ZFS Event Daemon (`zfs-zed`):**
   * คอนฟิกใน `/etc/zfs/zed.d/zed.rc` เปิด `ZED_NOTIFY_DATA=1` และ `ZED_NOTIFY_VERBOSE=1`
   * ฝังฟังก์ชัน `zed_notify_discord` ใน `/etc/zfs/zed.d/zed-functions.sh`
@@ -36,18 +79,13 @@
 * **VZDump Discord Hook Script (`/usr/local/bin/vzdump-discord.sh`):**
   * ผูกเข้ากับระบบ Proxmox ผ่าน `/etc/vzdump.conf` (`script: /usr/local/bin/vzdump-discord.sh`)
   * **กรณีสำเร็จ (Success):** ส่ง Embed สีเขียว รายงานชื่อ VM/Container, ID, ขนาดไฟล์แบ็กอัป, Storage ปลายทาง และระยะเวลาที่ใช้ (เช่น `1m 24s`)
-  * **กรณีล้มเหลว (Failed / Aborted):** ส่ง Embed สีแดง วิเคราะห์สาเหตุความผิดพลาด (ตรวจจับพื้นที่เต็ม `No space left on device`, Storage Offline หรือ Timeout) พร้อมตัด Log แนบมาให้ทันที
+  * **กรณีล้มเหลว (Failed / Aborted):** ส่ง Embed สีแดง แจ้งเตือนพร้อม Tag ระบุสาเหตุความผิดพลาด (ตรวจจับพื้นที่เต็ม `No space left on device`, Storage Offline หรือ Timeout) พร้อมตัด Log แนบมาให้ทันที
 
 ### 3. หมวด System Health & Resource Alerts (กันระบบน็อค)
 * **Daily Health Check (สรุปสุขภาพประจำวัน 08:00 น.):**
   * สคริปต์ `/usr/local/bin/discord-disk-report.sh` ทำงานผ่าน Cron `/etc/cron.d/pve-daily-health-check` ทุกวันเวลา 08:00 น.
-  * รายงาน:
-    * 🌡️ อุณหภูมิ CPU Package / AMD Tctl
-    * 🧠 ปริมาณการใช้ RAM (Used / Total และ %)
-    * 💾 พื้นที่จัดเก็บ Root Disk (`/`)
-    * 🗄️ สถานะและพื้นที่ ZFS Pool (`data`)
-    * 🔍 ตาราง S.M.A.R.T. สุขภาพ, อุณหภูมิ และ Bad Sector ของดิสก์ทั้ง 5 ลูก
-    * ⚡ สรุปจำนวน VM และ Container ที่กำลังทำงาน
+  * รันด้วย Python 3 ดึงข้อมูลสถานะแบบ Real-time พร้อมจัดฟอร์แมต Monospaced Table สวยงาม ไม่ล้นจอ
+  * พร้อม Tag `<@370422678009544714>` ส่งเสียงเตือนเข้า Discord ทุกเช้า
 * **Resource Warning เกินขีดจำกัด (`/usr/local/bin/pve-resource-monitor.sh`):**
   * รันตรวจเช็กทุก 5 นาทีผ่าน `/etc/cron.d/pve-resource-monitor`
   * **RAM > 90% เป็นเวลานาน:** แจ้งเตือนเมื่อ RAM เกิน 90% ติดต่อกันมากกว่า 10 นาที พร้อมแนบ Top 5 Process ที่กิน RAM สูงสุด (Cooldown 2 ชม.)
@@ -59,7 +97,7 @@
   * ยิงข้อความ `🚀 PVE Server Booted Up Successfully` ทันทีที่เน็ตเวิร์กพร้อม รายงานเวลาบูต, IP Addresses, Kernel, สถานะ ZFS และประวัติเหตุการณ์ก่อนหน้า (เช่น ไฟดับ หรือรีสตาร์ตปกติ)
 * **SSH Root Login Alert:**
   * สคริปต์ `/usr/local/bin/discord-ssh-login.sh` ผูกผ่าน PAM `/etc/pam.d/sshd`
-  * ยิงแจ้งเตือนทันทีที่มีคนล็อกอินเข้าผ่าน SSH ด้วยสิทธิ์ `root` พร้อมระบุ **IP ต้นทาง**, ประเภทเซสชัน (TTY) และจำนวนผู้ใช้ที่ออนไลน์อยู่ (รันแบบ Asynchronous ไม่หน่วงเวลาล็อกอิน)
+  * ยิงแจ้งเตือนพร้อม Tag ทันทีที่มีคนล็อกอินเข้าผ่าน SSH ด้วยสิทธิ์ `root` พร้อมระบุ **IP ต้นทาง**, ประเภทเซสชัน (TTY) และจำนวนผู้ใช้ที่ออนไลน์อยู่ (รันแบบ Asynchronous ไม่หน่วงเวลาล็อกอิน)
 
 ### 5. หมวด ZFS Auto-Snapshot (Sanoid)
 * ติดตั้งแพ็กเกจ `sanoid` พร้อมเปิดใช้งาน Systemd Timer `sanoid.timer` (ตรวจเช็กทุก 15 นาที)
@@ -76,8 +114,7 @@
 * **Discord Integration:** `/etc/fail2ban/action.d/discord-notify.conf` ส่งการ์ดแจ้งเตือนเข้า Discord ทันทีที่มีการแบน IP พร้อมระบุ IP, จำนวนครั้งที่พยายาม และระยะเวลาแบน
 
 ### 7. หมวด CPU Power & Thermal Tuning (AMD Ryzen Dynamic Scaling)
-* ตรวจพบไดรเวอร์เคอร์เนล `amd-pstate-epp` ถูกตั้งค่าเริ่มต้นเป็น `performance` (ล็อคความเร็วค้างที่ 3.8 GHz ตลอดเวลา)
-* ปรับจูนเป็น:
+* ปรับจูนไดรเวอร์ `amd-pstate-epp`:
   * **Scaling Governor:** `powersave`
   * **Energy Performance Preference (EPP):** `balance_performance`
 * ลดความเร็วตอน Idle ลงเหลือ ~1.4 - 2.9 GHz อุณหภูมิ CPU ลดลงมาอยู่ที่ **~33.8°C - 38.0°C** พัดลมเงียบลง และประหยัดไฟ โดยยังคงบูสต์ความเร็วเต็มกำลังทันทีเมื่อมีโหลด
@@ -89,7 +126,8 @@
 
 ```text
 My-PVE/
-├── README.md                              # เอกสารสรุประบบและวิธีใช้งาน
+├── README.md                              # เอกสารสรุประบบและวิธีใช้งานฉบับสมบูรณ์
+├── .gitignore                             # กรองไฟล์แคชและไฟล์ความลับออก
 ├── configs/
 │   ├── discord-notify.conf                # Action สำหรับ Fail2ban ส่ง Discord
 │   ├── jail.local                         # การตั้งค่า Fail2ban SSH jail & whitelist
@@ -101,8 +139,8 @@ My-PVE/
 │   └── pve-resource-monitor               # ตั้งเวลาตรวจวัด RAM > 90% และ ดิสก์ > 85% ทุก 5 นาที
 ├── scripts/
 │   ├── discord-boot-notify.sh             # สคริปต์แจ้งเตือนเมื่อเปิดเครื่องเสร็จ
-│   ├── discord-disk-report.sh             # สคริปต์ Daily Health Check รายงานละเอียด
-│   ├── discord-send.sh                    # สคริปต์ส่ง Discord Embed กลาง
+│   ├── discord-disk-report.sh             # สคริปต์ Daily Health Check รายงานละเอียด (Python 3)
+│   ├── discord-send.sh                    # สคริปต์ส่ง Discord Embed กลาง รองรับ Tag User ID
 │   ├── discord-ssh-login.sh               # สคริปต์ตรวจจับและแจ้งเตือน SSH Root Login
 │   ├── pve-resource-monitor.sh            # สคริปต์มอนิเตอร์ Resource Over-limit
 │   ├── set-cpu-governor.sh                # สคริปต์ตั้งค่า AMD CPU Governor
@@ -121,7 +159,7 @@ My-PVE/
    ```bash
    cp configs/pve-discord.conf.example /etc/pve-discord.conf
    chmod 600 /etc/pve-discord.conf
-   nano /etc/pve-discord.conf # ใส่ Discord Webhook URL จริง
+   nano /etc/pve-discord.conf # ใส่ Discord Webhook URL และ User ID
    ```
 
 2. คัดลอกสคริปต์ทั้งหมดไปยัง `/usr/local/bin/` และกำหนดสิทธิ์:
@@ -157,4 +195,3 @@ My-PVE/
 
 ---
 *บันทึกสถานะระบบ ณ วันที่ 30 ตุลาคม 2026 โดย Antigravity Assistant*
-
