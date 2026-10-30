@@ -8,7 +8,7 @@
 
 * **Server Hostname:** `pve` (IP: `192.168.100.253`)
 * **Processor (CPU):** AMD Ryzen 5 4600G with Radeon Graphics (6 Cores / 12 Threads)
-* **Memory (RAM):** 32 GB DDR4
+* **Memory (RAM):** 40 GB DDR4 (Kingston 8 GB + 32 GB)
 * **System Disk (OS):** 250 GB WD Blue SN580 NVMe SSD (LVM-Thin)
 * **Storage Pool (ZFS):** 4x 2TB Seagate BarraCuda SATA HDD (ZFS Mirror Pool `data` ~ 3.6 TB)
 * **OS / Hypervisor:** Proxmox VE 9.2 (Debian 13 Trixie, Linux Kernel 7.0)
@@ -157,3 +157,4 @@ My-PVE/
 
 ---
 *บันทึกสถานะระบบ ณ วันที่ 30 ตุลาคม 2026 โดย Antigravity Assistant*
+
