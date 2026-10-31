@@ -2,17 +2,14 @@
 # /usr/local/bin/discord-ssh-login.sh
 # SSH Root Login Alert for Discord (triggered by PAM)
 
-# Only trigger on session open for root user
 [ "$PAM_TYPE" = "open_session" ] || exit 0
 [ "$PAM_USER" = "root" ] || exit 0
 
 RHOST="${PAM_RHOST:-Unknown}"
-# Skip if connection is local loopback
 if [ "$RHOST" = "127.0.0.1" ] || [ "$RHOST" = "::1" ] || [ "$RHOST" = "localhost" ]; then
     exit 0
 fi
 
-# Rate-limit cooldown: at most 1 alert per remote IP every 60 seconds
 LOCK_FILE="/dev/shm/ssh_alert_${RHOST//[^a-zA-Z0-9_.-]/_}.lock"
 NOW=$(date +%s)
 if [ -f "$LOCK_FILE" ]; then
@@ -23,24 +20,38 @@ if [ -f "$LOCK_FILE" ]; then
 fi
 echo "$NOW" > "$LOCK_FILE"
 
-# Send notification asynchronously in background so SSH is never delayed
+CONF_FILE="/etc/pve-discord.conf"
+SSH_WEBHOOK=""
+if [ -f "$CONF_FILE" ]; then
+    . "$CONF_FILE"
+    SSH_WEBHOOK="${DISCORD_SSH_WEBHOOK_URL:-}"
+fi
+
 (
     HOST=$(hostname)
     DATE_STR=$(date '+%Y-%m-%d %H:%M:%S')
     TTY_INFO="${PAM_TTY:-non-interactive}"
     ROOT_SESSIONS=$(who 2>/dev/null | grep -c '^root' || echo "1")
 
-    /usr/local/bin/discord-send.sh \
-        --tag \
-        --title "🛡️ Security Alert: ตรวจพบการเข้าสู่ระบบ SSH Root" \
-        --desc "**แจ้งเตือนความปลอดภัย:** มีการล็อกอินเข้าใช้งานเซิร์ฟเวอร์ด้วยสิทธิ์ \`root\`" \
-        --color orange \
-        --field "User|root|true" \
-        --field "Remote IP|${RHOST}|true" \
-        --field "Host|${HOST}|true" \
-        --field "Time|${DATE_STR}|true" \
-        --field "Session TTY|${TTY_INFO}|true" \
-        --field "Active Sessions|${ROOT_SESSIONS}|true"
+    CMD_ARGS=(
+        "/usr/local/bin/discord-send.sh"
+        "--tag"
+        "--title" "🛡️ Security Alert: ตรวจพบการเข้าสู่ระบบ SSH Root"
+        "--desc" "**แจ้งเตือนความปลอดภัย:** มีการล็อกอินเข้าใช้งานเซิร์ฟเวอร์ด้วยสิทธิ์ \`root\`"
+        "--color" "orange"
+        "--field" "User" "root" "true"
+        "--field" "Remote IP" "${RHOST}" "true"
+        "--field" "Host" "${HOST}" "true"
+        "--field" "Time" "${DATE_STR}" "true"
+        "--field" "Session TTY" "${TTY_INFO}" "true"
+        "--field" "Active Sessions" "${ROOT_SESSIONS}" "true"
+    )
+
+    if [ -n "$SSH_WEBHOOK" ]; then
+        CMD_ARGS+=("--webhook" "$SSH_WEBHOOK")
+    fi
+
+    "${CMD_ARGS[@]}"
 ) >/dev/null 2>&1 &
 
 exit 0

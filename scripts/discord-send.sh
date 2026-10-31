@@ -5,7 +5,6 @@ set -eo pipefail
 
 CONF_FILE="/etc/pve-discord.conf"
 if [ -f "$CONF_FILE" ]; then
-    # shellcheck disable=SC1090
     . "$CONF_FILE"
 fi
 
@@ -13,11 +12,6 @@ WEBHOOK="${DISCORD_WEBHOOK_URL:-}"
 USERNAME="${DISCORD_USERNAME:-PVE-Monitor}"
 AVATAR="${DISCORD_AVATAR:-}"
 GLOBAL_TAG="${DISCORD_TAG:-}"
-
-if [ -z "$WEBHOOK" ]; then
-    echo "ERROR: DISCORD_WEBHOOK_URL is not set in $CONF_FILE" >&2
-    exit 1
-fi
 
 TITLE=""
 DESCRIPTION=""
@@ -32,6 +26,10 @@ declare -a FIELD_INLINES=()
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --webhook)
+            WEBHOOK="$2"
+            shift 2
+            ;;
         --title)
             TITLE="$2"
             shift 2
@@ -110,10 +108,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Convert any literal \n into real newlines
+if [ -z "$WEBHOOK" ]; then
+    echo "ERROR: Webhook URL is not set" >&2
+    exit 1
+fi
+
 DESCRIPTION=$(echo -e "$DESCRIPTION")
 
-# Format Tag if specified
 FORMATTED_TAG=""
 if [ -n "$TAG_USER" ]; then
     if [[ "$TAG_USER" == \<@*\> ]]; then
@@ -127,7 +128,6 @@ if [ -n "$TAG_USER" ]; then
     fi
 fi
 
-# Build JSON payload
 if [ -n "$CONTENT" ] && [ -z "$TITLE" ] && [ -z "$DESCRIPTION" ]; then
     FINAL_CONTENT="$(echo -e "$CONTENT")"
     [ -n "$FORMATTED_TAG" ] && FINAL_CONTENT="${FORMATTED_TAG} ${FINAL_CONTENT}"
@@ -137,7 +137,6 @@ if [ -n "$CONTENT" ] && [ -z "$TITLE" ] && [ -z "$DESCRIPTION" ]; then
         --arg avatar "$AVATAR" \
         '{content: $content, username: $username, avatar_url: $avatar}')
 else
-    # Build fields array safely with jq
     FIELDS_JSON="[]"
     for i in "${!FIELD_NAMES[@]}"; do
         fn="${FIELD_NAMES[$i]}"
@@ -181,7 +180,6 @@ else
         } | del(.[] | select(. == null))')
 fi
 
-# Send webhook with retry and timeout
 curl -s -S --max-time 15 \
     -H "Content-Type: application/json" \
     -X POST \

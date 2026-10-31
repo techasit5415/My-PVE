@@ -74,6 +74,15 @@ Total: 1/3 Running               🟢 106  openvpn
 * **ZFS Monthly Scrub Summary:**
   * ตั้งเวลา Scrub อัตโนมัติทุกวันอาทิตย์ที่ 2 ของเดือน (`/etc/cron.d/zfsutils-linux`)
   * เมื่อ Scrub เสร็จสิ้น ZED จะส่งผลสรุปเข้า Discord (ปริมาณข้อมูลที่ตรวจ, เวลาที่ใช้, มี Bit Rot หรือบล็อกข้อมูลถูกซ่อมแซมหรือไม่)
+* **ZFS Resilver Alert & Progress Updates (แจ้งเตือน Rebuild ข้อมูล):**
+  * ดักจับอีเวนต์ ZED โดยตรงผ่าน `/usr/local/bin/discord-zed-resilver.sh` แจ้งเตือนทันทีเมื่อเริ่ม Resilver (`resilver_start`) และเสร็จสิ้น (`resilver_finish`) พร้อมแยกส่งเข้าห้อง Discord Resilver Webhook โดยเฉพาะ
+  * มีระบบติดตามความคืบหน้าใน `/usr/local/bin/pve-resource-monitor.sh` ส่งอัปเดต % ความคืบหน้า (Progress) และเวลาโดยประมาณทุก 15 นาทีจนกว่าจะเสร็จสิ้น
+* **Automated Background SMART Self-Test:**
+  * ติดตั้งตัวสั่งรันการทดสอบฮาร์ดแวร์ดิสก์อัตโนมัติ `/usr/local/bin/pve-smart-test.sh` ผ่าน `/etc/cron.d/pve-smart-tests`
+  * **Short Test (1-2 นาที):** รันทุกวันเวลา 03:00 น. ตรวจสอบกลไกและไฟฟ้า
+  * **Long / Extended Surface Test (2-4 ชม.):** รันทุก 2 สัปดาห์ (วันที่ 1 และ 15 เวลา 02:00 น.) สแกนตรวจหา Bad Sector แฝงทั่วทุกเซกเตอร์
+* **Semi-Auto Disk Replace Tool (`/usr/local/bin/pve-disk-replace`):**
+  * เครื่องมือช่วยเปลี่ยนดิสก์ ZFS (`data`) แบบ CLI ช่วยตรวจจับดิสก์ใหม่ สั่ง `zpool replace` และส่งสรุปผลเข้า Discord อัตโนมัติ
 
 ### 2. หมวด Backup & Data Protection (VZDump / PBS Hook)
 * **VZDump Discord Hook Script (`/usr/local/bin/vzdump-discord.sh`):**
@@ -136,13 +145,17 @@ My-PVE/
 │   └── smartd.conf                        # การตั้งค่ามอนิเตอร์ฮาร์ดแวร์ดิสก์ทั้ง 5 ลูก
 ├── cron/
 │   ├── pve-daily-health-check             # ตั้งเวลารายงานสรุปสุขภาพประจำวัน 08:00 น.
-│   └── pve-resource-monitor               # ตั้งเวลาตรวจวัด RAM > 90% และ ดิสก์ > 85% ทุก 5 นาที
+│   ├── pve-resource-monitor               # ตั้งเวลาตรวจวัด RAM > 90% และ ดิสก์ > 85% ทุก 5 นาที
+│   └── pve-smart-tests                    # ตั้งเวลาทดสอบ SMART Short / Long Self-test อัตโนมัติ
 ├── scripts/
 │   ├── discord-boot-notify.sh             # สคริปต์แจ้งเตือนเมื่อเปิดเครื่องเสร็จ
 │   ├── discord-disk-report.sh             # สคริปต์ Daily Health Check รายงานละเอียด (Python 3)
-│   ├── discord-send.sh                    # สคริปต์ส่ง Discord Embed กลาง รองรับ Tag User ID
+│   ├── discord-send.sh                    # สคริปต์ส่ง Discord Embed กลาง รองรับ Tag User ID และแยก Webhook
 │   ├── discord-ssh-login.sh               # สคริปต์ตรวจจับและแจ้งเตือน SSH Root Login
-│   ├── pve-resource-monitor.sh            # สคริปต์มอนิเตอร์ Resource Over-limit
+│   ├── discord-zed-resilver.sh            # สคริปต์ดักจับเหตุการณ์ ZFS Resilver Start / Finish จาก ZED
+│   ├── pve-disk-replace                   # เครื่องมือเปลี่ยนดิสก์ ZFS Pool กึ่งอัตโนมัติ (CLI)
+│   ├── pve-resource-monitor.sh            # สคริปต์มอนิเตอร์ Resource Over-limit และรายงาน Resilver Progress
+│   ├── pve-smart-test.sh                  # สคริปต์สั่งรัน SMART Self-Test บนดิสก์ทุกลูก
 │   ├── set-cpu-governor.sh                # สคริปต์ตั้งค่า AMD CPU Governor
 │   ├── smartd-discord.sh                  # สคริปต์ดักจับเหตุการณ์ smartd
 │   └── vzdump-discord.sh                  # Hook สคริปต์แจ้งเตือนผลแบ็กอัป VM/CT
@@ -191,6 +204,13 @@ My-PVE/
 6. เปิดใช้งาน SSH Login Hook ใน `/etc/pam.d/sshd`:
    ```text
    session optional pam_exec.so seteuid /usr/local/bin/discord-ssh-login.sh
+   ```
+
+7. เชื่อมต่อ ZFS Event Daemon (ZED) สำหรับแจ้งเตือน Resilver:
+   ```bash
+   ln -sf /usr/local/bin/discord-zed-resilver.sh /etc/zfs/zed.d/resilver_start-discord.sh
+   ln -sf /usr/local/bin/discord-zed-resilver.sh /etc/zfs/zed.d/resilver_finish-discord.sh
+   systemctl restart zfs-zed
    ```
 
 ---

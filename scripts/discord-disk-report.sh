@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # /usr/local/bin/discord-disk-report.sh
 # Daily System Health, Storage & Guests Report for Proxmox VE
+import os
 import subprocess
 import datetime
 import socket
+
+# Ensure system binary paths are available under cron/limited environments
+os.environ["PATH"] = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:" + os.environ.get("PATH", "")
 
 def run_cmd(cmd):
     try:
@@ -16,14 +20,17 @@ date_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 uptime_str = run_cmd("uptime -p") or run_cmd("uptime")
 ip_addr = run_cmd("hostname -I").split()[0] if run_cmd("hostname -I") else "127.0.0.1"
 
-# 1. CPU Temperature (AMD k10temp / Intel fallback)
+# 1. CPU Temperature (AMD k10temp / Intel coretemp / Dual Xeon)
 sensors_out = run_cmd("sensors")
 cpu_temp = "N/A"
 for line in sensors_out.splitlines():
-    if any(k in line for k in ["Tctl", "Package id 0", "CPU Temperature"]):
+    if any(k in line for k in ["Tctl", "Package id 0", "CPU Temperature", "Core 0"]):
         parts = line.split()
-        if len(parts) >= 2:
-            cpu_temp = parts[1].replace("+", "")
+        for p in parts:
+            if "°C" in p:
+                cpu_temp = p.replace("+", "")
+                break
+        if cpu_temp != "N/A":
             break
 
 # 2. RAM Usage
@@ -48,62 +55,99 @@ if len(df_root) >= 2:
     root_str = f"{parts[2]} / {parts[1]} ({parts[4]})"
     root_pct = int(parts[4].replace("%", "")) if parts[4].replace("%", "").isdigit() else 0
 
-# 4. NVMe System SSD
-nvme_out = run_cmd("smartctl -A /dev/nvme0n1")
-nvme_temp = "N/A"
-nvme_wear = "0%"
-nvme_tbw = "N/A"
-for line in nvme_out.splitlines():
-    if "Temperature:" in line and "Sensor" not in line:
-        nvme_temp = line.split()[1] + "°C"
-    elif "Percentage Used:" in line:
-        nvme_wear = line.split()[2]
-    elif "Data Units Written:" in line:
-        parts = line.split()
-        if len(parts) >= 6:
-            nvme_tbw = f"{parts[4]} {parts[5].replace('[', '').replace(']', '')}"
+# 4. NVMe System SSD (if present)
+has_nvme = os.path.exists("/dev/nvme0n1")
+nvme_str = ""
+nvme_status = "PASSED"
+if has_nvme:
+    nvme_h_out = run_cmd("smartctl -H /dev/nvme0n1")
+    nvme_status = "PASSED" if any(k in nvme_h_out.upper() for k in ["PASSED", "OK"]) else "ALERT"
+    nvme_out = run_cmd("smartctl -A /dev/nvme0n1")
+    nvme_temp = "N/A"
+    nvme_wear = "0%"
+    nvme_tbw = "N/A"
+    for line in nvme_out.splitlines():
+        if "Temperature:" in line and "Sensor" not in line:
+            parts = line.split()
+            if len(parts) >= 2:
+                nvme_temp = parts[1] + "°C"
+        elif "Percentage Used:" in line:
+            parts = line.split()
+            if len(parts) >= 3:
+                nvme_wear = parts[2]
+        elif "Data Units Written:" in line:
+            parts = line.split()
+            if len(parts) >= 6:
+                nvme_tbw = f"{parts[4].replace('[', '')} {parts[5].replace(']', '')}"
+    wear_num = int(nvme_wear.replace("%", "")) if nvme_wear.replace("%", "").isdigit() else 0
+    nvme_health = f"{100 - wear_num}%"
+    nvme_str = (
+        f"Health:  {nvme_health} (Wear: {nvme_wear} | TBW: {nvme_tbw})\n"
+        f"Status:  {nvme_status} | Temp: {nvme_temp} | Errs: 0"
+    )
 
-wear_num = int(nvme_wear.replace("%", "")) if nvme_wear.replace("%", "").isdigit() else 0
-nvme_health = f"{100 - wear_num}%"
-nvme_str = (
-    f"Health:  {nvme_health} (Wear: {nvme_wear} | TBW: {nvme_tbw})\n"
-    f"Status:  PASSED | Temp: {nvme_temp} | Errs: 0"
-)
+# 5. Hard Disks S.M.A.R.T. (Auto-detect SATA & SAS)
+disks = []
+for line in run_cmd("lsblk -d -n -o NAME,TYPE").splitlines():
+    parts = line.split()
+    if len(parts) >= 2 and parts[1] == "disk":
+        dname = parts[0]
+        if not dname.startswith(("zd", "loop", "ram", "nvme")):
+            disks.append(dname)
+disks.sort()
 
-# 5. SATA HDDs S.M.A.R.T. (Clean Monospaced Table)
 hdd_lines = [
     "Disk   Health   Temp   Bad Sector",
     "---------------------------------"
 ]
-any_hdd_fail = False
-for d in ["sda", "sdb", "sdc", "sdd"]:
+any_hdd_fail = (has_nvme and nvme_status != "PASSED")
+any_hdd_warn = False
+for d in disks:
     dev = f"/dev/{d}"
     h_out = run_cmd(f"smartctl -H {dev}")
-    health = "PASSED" if "PASSED" in h_out or "OK" in h_out else "ALERT"
-    if health != "PASSED":
-        any_hdd_fail = True
+    health = "PASSED" if any(k in h_out.upper() for k in ["PASSED", "OK"]) else "ALERT"
 
     a_out = run_cmd(f"smartctl -A {dev}")
     t_val = "N/A"
     bad_val = "0"
     for l in a_out.splitlines():
-        if "Temperature_Celsius" in l or "Airflow_Temperature" in l:
+        if "Current Drive Temperature:" in l:
+            parts = l.split()
+            if len(parts) >= 4:
+                t_val = f"{parts[3]}°C"
+        elif "Temperature_Celsius" in l or "Airflow_Temperature" in l:
             parts = l.split()
             if len(parts) >= 10:
-                t_val = parts[9] + "°C"
+                t_val = f"{parts[9]}°C"
+
+        if "Elements in grown defect list:" in l:
+            bad_val = l.split(":")[-1].strip()
         elif "Reallocated_Sector_Ct" in l:
             parts = l.split()
             if len(parts) >= 10:
                 bad_val = parts[9]
-    hdd_lines.append(f"{d:<6} {health:<8} {t_val:<6} {bad_val}")
-hdd_table = "\n".join(hdd_lines)
 
-# 6. ZFS Storage Pool
-zpool_out = run_cmd("zpool list -H -o name,size,alloc,free,cap,health").split()
-if len(zpool_out) >= 6:
-    zfs_str = f"Pool: {zpool_out[0]} ({zpool_out[5]})\nUsed: {zpool_out[2]} / {zpool_out[1]} ({zpool_out[4]})"
-else:
-    zfs_str = "No ZFS pools found"
+    bad_num = int(bad_val) if bad_val.isdigit() else 0
+    if health == "PASSED" and bad_num > 0:
+        health = "WARN"
+
+    if health == "ALERT":
+        any_hdd_fail = True
+    elif health == "WARN":
+        any_hdd_warn = True
+
+    hdd_lines.append(f"{d:<6} {health:<8} {t_val:<6} {bad_val}")
+
+hdd_table = "\n".join(hdd_lines) if disks else "No hard disks detected"
+
+# 6. ZFS Storage Pool(s)
+zpool_out = run_cmd("zpool list -H -o name,size,alloc,free,cap,health").splitlines()
+zfs_lines = []
+for zp in zpool_out:
+    parts = zp.split()
+    if len(parts) >= 6:
+        zfs_lines.append(f"Pool: {parts[0]} ({parts[5]})\nUsed: {parts[2]} / {parts[1]} ({parts[4]})")
+zfs_str = "\n\n".join(zfs_lines) if zfs_lines else "No ZFS pools found"
 
 # 7. Virtual Machines (VM)
 qm_out = run_cmd("qm list").splitlines()
@@ -123,7 +167,7 @@ total_vms = len(qm_out) - 1 if len(qm_out) > 1 else 0
 vm_str = "\n".join(vm_lines) if vm_lines else "No VMs"
 vm_str += f"\n\nTotal: {vm_run}/{total_vms} Running"
 
-# 8. Containers (LXC CT) - Notice parts[-1] is Name!
+# 8. Containers (LXC CT)
 pct_out = run_cmd("pct list").splitlines()
 ct_lines = []
 ct_run = 0
@@ -145,7 +189,7 @@ ct_str += f"\n\nTotal: {ct_run}/{total_cts} Running"
 color = "green"
 if any_hdd_fail:
     color = "red"
-elif ram_pct > 90 or root_pct > 85:
+elif any_hdd_warn or ram_pct > 90 or root_pct > 85:
     color = "yellow"
 
 desc = (
@@ -154,7 +198,7 @@ desc = (
     f"⏰ **เวลาตรวจ:** {date_str}"
 )
 
-# Call /usr/local/bin/discord-send.sh
+# Build command for /usr/local/bin/discord-send.sh
 cmd = [
     "/usr/local/bin/discord-send.sh",
     "--tag",
@@ -164,11 +208,16 @@ cmd = [
     "--field", "🌡️ CPU Temp", cpu_temp, "true",
     "--field", "🧠 Memory (RAM)", ram_str, "true",
     "--field", "💾 Root Disk (/)", root_str, "true",
-    "--field", "⚡ NVMe System SSD (250GB)", f"```text\n{nvme_str}\n```", "false",
-    "--field", "🔍 SATA Hard Disks S.M.A.R.T.", f"```text\n{hdd_table}\n```", "false",
+]
+
+if has_nvme and nvme_str:
+    cmd.extend(["--field", "⚡ NVMe System SSD", f"```text\n{nvme_str}\n```", "false"])
+
+cmd.extend([
+    "--field", "🔍 Hard Disks S.M.A.R.T.", f"```text\n{hdd_table}\n```", "false",
     "--field", "🗄️ ZFS Storage Pool", f"```text\n{zfs_str}\n```", "false",
     "--field", "🖥️ Virtual Machines (VM)", f"```text\n{vm_str}\n```", "true",
     "--field", "📦 Containers (LXC CT)", f"```text\n{ct_str}\n```", "true",
-]
+])
 
 subprocess.run(cmd, check=True)

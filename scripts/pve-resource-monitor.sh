@@ -75,6 +75,41 @@ else
     fi
 fi
 
+# ---------------- ZFS RESILVER PROGRESS MONITOR ----------------
+if command -v zpool >/dev/null 2>&1; then
+    CONF_FILE="/etc/pve-discord.conf"
+    RES_WH=""
+    [ -f "$CONF_FILE" ] && . "$CONF_FILE" && RES_WH="${DISCORD_RESILVER_WEBHOOK_URL:-}"
+
+    for p_name in $(zpool list -H -o name 2>/dev/null); do
+        SCAN_LINE=$(zpool status "$p_name" 2>/dev/null | grep -E "scan:" || true)
+        PROGRESS_LOCK="/var/run/pve_resilver_${p_name}_progress"
+
+        if echo "$SCAN_LINE" | grep -qi "resilver in progress"; then
+            PROG_DETAIL=$(echo "$SCAN_LINE" | sed "s/^[ \t]*scan:[ \t]*//")
+            CUR_TIME=$(date +%s)
+            LAST_REPORT=0
+            [ -f "$PROGRESS_LOCK" ] && LAST_REPORT=$(cat "$PROGRESS_LOCK" 2>/dev/null || echo 0)
+
+            # Send progress every 15 minutes (900 seconds) while resilvering
+            if [ $((CUR_TIME - LAST_REPORT)) -ge 900 ]; then
+                echo "$CUR_TIME" > "$PROGRESS_LOCK"
+                /usr/local/bin/discord-send.sh \
+                    ${RES_WH:+--webhook "$RES_WH"} \
+                    --title "⏳ ZFS Resilver in Progress: พูล $p_name" \
+                    --desc "**อัปเดตสถานะ Resilver:** กำลังซิงก์ข้อมูลเข้าสู่ดิสก์ลูกใหม่" \
+                    --color "yellow" \
+                    --field "Host" "$(hostname)" "true" \
+                    --field "Pool" "$p_name" "true" \
+                    --field "Status" "Resilvering" "true" \
+                    --field "Progress" "```text\n$PROG_DETAIL\n```" "false"
+            fi
+        else
+            rm -f "$PROGRESS_LOCK"
+        fi
+    done
+fi
+
 # ---------------- ZFS STORAGE POOLS CHECK (> 85%) ----------------
 if command -v zpool >/dev/null 2>&1; then
     while read -r pool cap; do

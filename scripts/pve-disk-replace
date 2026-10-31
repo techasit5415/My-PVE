@@ -1,0 +1,335 @@
+#!/bin/bash
+# /usr/local/bin/pve-disk-replace
+# Interactive Semi-Automatic ZFS Disk Replacement Tool for Proxmox VE
+set -eo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+clear_banner() {
+    echo -e "${BOLD}${CYAN}==============================================================${NC}"
+    echo -e "${BOLD}${CYAN}     Proxmox VE - Semi-Auto ZFS Disk Replacement Tool         ${NC}"
+    echo -e "${BOLD}${CYAN}==============================================================${NC}"
+}
+
+clear_banner
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo -e "${RED}Error: สคริปต์นี้ต้องรันด้วยสิทธิ์ root เท่านั้น${NC}" >&2
+    exit 1
+fi
+
+# 1. Detect Pools
+mapfile -t POOLS < <(zpool list -H -o name 2>/dev/null || true)
+if [ ${#POOLS[@]} -eq 0 ]; then
+    echo -e "${RED}ไม่พบ ZFS Storage Pool บนเครื่องนี้${NC}"
+    exit 1
+fi
+
+POOL="${POOLS[0]}"
+if [ ${#POOLS[@]} -gt 1 ]; then
+    echo -e "\n${BOLD}เลือก ZFS Pool ที่ต้องการจัดการ:${NC}"
+    for i in "${!POOLS[@]}"; do
+        echo -e "  $((i+1))) ${GREEN}${POOLS[$i]}${NC}"
+    done
+    read -rp "ระบุหมายเลขพูล [1-${#POOLS[@]}]: " P_NUM
+    if [[ "$P_NUM" =~ ^[0-9]+$ ]] && [ "$P_NUM" -ge 1 ] && [ "$P_NUM" -le "${#POOLS[@]}" ]; then
+        POOL="${POOLS[$((P_NUM-1))]}"
+    fi
+fi
+echo -e "\n${BOLD}พูลที่เลือก:${NC} ${GREEN}${POOL}${NC}"
+
+get_disk_by_id() {
+    local dev="$1"
+    local match
+    match=$(find /dev/disk/by-id/ -maxdepth 1 -lname "*/$dev" 2>/dev/null | grep -E 'ata-|scsi-|nvme-' | head -n 1 || true)
+    [ -z "$match" ] && match=$(find /dev/disk/by-id/ -maxdepth 1 -lname "*/$dev" 2>/dev/null | head -n 1 || true)
+    echo "$match"
+}
+
+get_part_by_id() {
+    local dev="$1"
+    local part="$2"
+    local match
+    match=$(find /dev/disk/by-id/ -maxdepth 1 -lname "*/${dev}${part}" 2>/dev/null | grep -E 'ata-|scsi-|nvme-' | head -n 1 || true)
+    [ -z "$match" ] && match=$(find /dev/disk/by-id/ -maxdepth 1 -lname "*/${dev}${part}" 2>/dev/null | head -n 1 || true)
+    echo "$match"
+}
+
+find_healthy_peer() {
+    local pool="$1"
+    local old_vdev="$2"
+    local peer_part3
+    peer_part3=$(zpool status "$pool" | awk "/ONLINE/{print \$1}" | grep -E "\-part3$" | grep -v "$old_vdev" | head -n 1 || true)
+    if [ -z "$peer_part3" ]; then
+        peer_part3=$(zpool status "$pool" | awk "/ONLINE/{print \$1}" | grep -E "\-part3$" | head -n 1 || true)
+    fi
+    if [ -n "$peer_part3" ]; then
+        local peer_disk="${peer_part3%-part3}"
+        if [ -e "/dev/disk/by-id/$peer_disk" ]; then
+            echo "/dev/disk/by-id/$peer_disk"
+            return 0
+        elif [ -e "$peer_disk" ]; then
+            echo "$peer_disk"
+            return 0
+        fi
+    fi
+    for p in /dev/disk/by-id/*-part3; do
+        [ -e "$p" ] || continue
+        echo "${p%-part3}"
+        return 0
+    done
+    return 1
+}
+
+# 2. Analyze Pool vdevs & Find Problematic Disks
+echo -e "\n${BOLD}กำลังวิเคราะห์สถานะ vdevs ในพูล ${POOL}...${NC}"
+
+mapfile -t VDEVS < <(zpool status -v "$POOL" | awk '$1 ~ /^[a-zA-Z0-9_\-\/]+$/ && $2 ~ /^(ONLINE|FAULTED|DEGRADED|UNAVAIL|OFFLINE|REMOVED)$/ {print $1, $2}')
+
+declare -a VDEV_NAMES=()
+declare -a VDEV_STATES=()
+declare -a VDEV_INFOS=()
+FAULT_IDX=-1
+
+idx=0
+for entry in "${VDEVS[@]}"; do
+    vname=$(echo "$entry" | awk '{print $1}')
+    vstate=$(echo "$entry" | awk '{print $2}')
+    
+    if [[ "$vname" == "$POOL" ]] || [[ "$vname" =~ ^(mirror|raidz|draid) ]]; then
+        continue
+    fi
+
+    smart_info=""
+    real_dev=""
+    if [ -e "/dev/disk/by-id/$vname" ]; then
+        real_dev=$(readlink -f "/dev/disk/by-id/$vname")
+    elif [ -e "/dev/$vname" ]; then
+        real_dev="/dev/$vname"
+    fi
+
+    if [ -n "$real_dev" ] && command -v smartctl >/dev/null 2>&1; then
+        parent_dev=$(lsblk -no PKNAME "$real_dev" 2>/dev/null | head -n 1 || true)
+        [ -z "$parent_dev" ] && parent_dev=$(basename "$real_dev")
+        if [ -b "/dev/$parent_dev" ]; then
+            bad_cnt=$(smartctl -A "/dev/$parent_dev" 2>/dev/null | awk '/Reallocated_Sector_Ct/{print $10}' || true)
+            if [ -n "$bad_cnt" ] && [ "$bad_cnt" -gt 0 ] 2>/dev/null; then
+                smart_info="${YELLOW}[Bad Sector: ${bad_cnt}]${NC}"
+            fi
+        fi
+    fi
+
+    VDEV_NAMES+=("$vname")
+    VDEV_STATES+=("$vstate")
+    VDEV_INFOS+=("$smart_info")
+
+    if [[ "$vstate" =~ (FAULTED|UNAVAIL|DEGRADED|OFFLINE|REMOVED) ]] || [[ "$vname" =~ ^[0-9]{10,} ]]; then
+        [ $FAULT_IDX -eq -1 ] && FAULT_IDX=$idx
+    elif [ -n "$smart_info" ] && [ $FAULT_IDX -eq -1 ]; then
+        FAULT_IDX=$idx
+    fi
+
+    idx=$((idx+1))
+done
+
+if [ ${#VDEV_NAMES[@]} -eq 0 ]; then
+    echo -e "${RED}ไม่สามารถดึงรายชื่อดิสก์จากพูลได้${NC}"
+    exit 1
+fi
+
+echo -e "\n${BOLD}รายชื่อดิสก์ในพูล ${POOL}:${NC}"
+for i in "${!VDEV_NAMES[@]}"; do
+    vn="${VDEV_NAMES[$i]}"
+    st="${VDEV_STATES[$i]}"
+    info="${VDEV_INFOS[$i]}"
+    rec=""
+    [ $i -eq $FAULT_IDX ] && rec="${YELLOW} <== แนะนำ (มีปัญหา)${NC}"
+
+    color="$GREEN"
+    [[ "$st" != "ONLINE" ]] && color="$RED"
+
+    printf "  %2d) %-50s [%b%-8s%b] %b%b\n" "$((i+1))" "$vn" "$color" "$st" "$NC" "$info" "$rec"
+done
+
+default_choice=$((FAULT_IDX + 1))
+[ $default_choice -le 0 ] && default_choice=1
+
+read -rp "เลือกลูกเดิมที่ต้องการปลดระวาง/เปลี่ยน [1-${#VDEV_NAMES[@]} หรือพิมพ์ชื่อ] (ค่าเริ่มต้น $default_choice): " OLD_INPUT
+OLD_INPUT="${OLD_INPUT:-$default_choice}"
+
+if [[ "$OLD_INPUT" =~ ^[0-9]+$ ]] && [ "$OLD_INPUT" -ge 1 ] && [ "$OLD_INPUT" -le "${#VDEV_NAMES[@]}" ]; then
+    OLD_VDEV="${VDEV_NAMES[$((OLD_INPUT-1))]}"
+else
+    OLD_VDEV="$OLD_INPUT"
+fi
+
+echo -e "\n${BOLD}ดิสก์เดิมที่เลือก:${NC} ${RED}${OLD_VDEV}${NC}"
+
+# 3. Detect Candidate Replacement Disks
+echo -e "\n${BOLD}กำลังตรวจหาดิสก์ใหม่ในเครื่อง...${NC}"
+
+declare -a CANDIDATES=()
+declare -a CANDIDATE_DESC=()
+
+for devpath in /dev/sd[a-z] /dev/sd[a-z][a-z] /dev/nvme[0-9]n[0-9]; do
+    [ -b "$devpath" ] || continue
+    dname=$(basename "$devpath")
+
+    mounts=$(lsblk -no MOUNTPOINTS "$devpath" 2>/dev/null | tr -d '[:space:]' || true)
+    [ -n "$mounts" ] && continue
+
+    is_lvm=$(pvs --noheadings -o pv_name 2>/dev/null | grep -E "$devpath" || true)
+    [ -n "$is_lvm" ] && continue
+
+    fstypes=$(lsblk -no FSTYPE "$devpath" 2>/dev/null | tr -d '[:space:]' || true)
+    
+    model=$(lsblk -d -no MODEL "$devpath" 2>/dev/null | sed 's/^[ \t]*//' || true)
+    serial=$(lsblk -d -no SERIAL "$devpath" 2>/dev/null | sed 's/^[ \t]*//' || true)
+    size=$(lsblk -d -no SIZE "$devpath" 2>/dev/null | sed 's/^[ \t]*//' || true)
+
+    status_tag="${GREEN}(ดิสก์ว่าง / พร้อมใช้งาน)${NC}"
+    if [[ "$fstypes" =~ zfs_member ]]; then
+        status_tag="${YELLOW}(มีพาร์ติชัน ZFS เดิม)${NC}"
+    fi
+
+    desc="$devpath - $model [S/N: $serial, ขนาด: $size] $status_tag"
+    CANDIDATES+=("$devpath")
+    CANDIDATE_DESC+=("$desc")
+done
+
+NEW_DEV=""
+if [ ${#CANDIDATES[@]} -gt 0 ]; then
+    echo -e "${BOLD}ตรวจพบดิสก์ที่สามารถนำมาใช้งานได้:${NC}"
+    for i in "${!CANDIDATES[@]}"; do
+        echo -e "  $((i+1))) ${CANDIDATE_DESC[$i]}"
+    done
+    read -rp "เลือกลูกใหม่ที่ต้องการนำมาแทน [1-${#CANDIDATES[@]} หรือระบุ path เช่น /dev/sdd]: " NEW_INPUT
+    if [[ "$NEW_INPUT" =~ ^[0-9]+$ ]] && [ "$NEW_INPUT" -ge 1 ] && [ "$NEW_INPUT" -le "${#CANDIDATES[@]}" ]; then
+        NEW_DEV="${CANDIDATES[$((NEW_INPUT-1))]}"
+    else
+        NEW_DEV="$NEW_INPUT"
+    fi
+else
+    echo -e "${YELLOW}ไม่พบดิสก์ว่างโดยอัตโนมัติ (หรือดิสก์อาจมีพาร์ติชันเก่าค้างอยู่)${NC}"
+    read -rp "กรุณาระบุ Device Path ของดิสก์ใหม่ (เช่น /dev/sdd): " NEW_DEV
+fi
+
+if [ ! -b "$NEW_DEV" ]; then
+    echo -e "${RED}Error: ไม่พบอุปกรณ์บล็อก $NEW_DEV${NC}" >&2
+    exit 1
+fi
+
+NEW_DNAME=$(basename "$NEW_DEV")
+NEW_MODEL=$(lsblk -d -no MODEL "$NEW_DEV" 2>/dev/null | sed 's/^[ \t]*//' || true)
+NEW_SERIAL=$(lsblk -d -no SERIAL "$NEW_DEV" 2>/dev/null | sed 's/^[ \t]*//' || true)
+NEW_SIZE=$(lsblk -d -no SIZE "$NEW_DEV" 2>/dev/null | sed 's/^[ \t]*//' || true)
+
+# 4. Check if Boot Pool (rpool with part3) or Data Pool
+IS_BOOT_POOL=0
+if [[ "$OLD_VDEV" =~ -part3$ ]] || [[ "$OLD_VDEV" =~ 3$ ]] || zpool status "$POOL" | grep -q '\-part3'; then
+    IS_BOOT_POOL=1
+fi
+
+PEER_DEV=""
+if [ $IS_BOOT_POOL -eq 1 ]; then
+    PEER_DEV=$(find_healthy_peer "$POOL" "$OLD_VDEV" || true)
+fi
+
+# 5. Confirmation Screen
+echo -e "\n${BOLD}${CYAN}--------------------------------------------------------------${NC}"
+echo -e "${BOLD}สรุปการทำงาน:${NC}"
+echo -e "  • เซิร์ฟเวอร์:     ${BOLD}$(hostname)${NC}"
+echo -e "  • ZFS Pool:       ${GREEN}${POOL}${NC}"
+echo -e "  • ดิสก์เดิมที่เสีย: ${RED}${OLD_VDEV}${NC}"
+echo -e "  • ดิสก์ใหม่:       ${GREEN}${NEW_DEV}${NC} ($NEW_MODEL, S/N: $NEW_SERIAL, $NEW_SIZE)"
+if [ $IS_BOOT_POOL -eq 1 ]; then
+    echo -e "  • ประเภทพูล:      ${CYAN}Proxmox Boot Pool (UEFI rpool)${NC}"
+    echo -e "  • ดิสก์ต้นแบบ:    ${GREEN}${PEER_DEV}${NC} (ใช้โคลน Partition Table)"
+    echo -e "  • ขั้นตอนที่จะรัน: 1) sgdisk --zap-all"
+    echo -e "                    2) sgdisk --replicate จาก $PEER_DEV"
+    echo -e "                    3) sgdisk --randomize-guids"
+    echo -e "                    4) mkfs.vfat -F 32 ${NEW_DEV}2"
+    echo -e "                    5) proxmox-boot-tool init ${NEW_DEV}2"
+    echo -e "                    6) zpool replace $POOL $OLD_VDEV <new-part3>"
+    echo -e "                    7) ดับไฟ Locate LED ที่ถาด"
+    echo -e "                    8) แจ้งเตือนเข้า Discord"
+else
+    echo -e "  • ประเภทพูล:      ${CYAN}ZFS Data Storage Pool${NC}"
+    echo -e "  • ขั้นตอนที่จะรัน: 1) zpool replace $POOL $OLD_VDEV $NEW_DEV"
+    echo -e "                    2) ดับไฟ Locate LED ที่ถาด"
+    echo -e "                    3) แจ้งเตือนเข้า Discord"
+fi
+echo -e "${BOLD}${RED}⚠️  คำเตือน: ข้อมูลทั้งหมดบน ${NEW_DEV} จะถูกลบและเขียนทับอย่างถาวร!${NC}"
+echo -e "${BOLD}${CYAN}--------------------------------------------------------------${NC}"
+
+read -rp "ยืนยันเริ่มกระบวนการเปลี่ยนดิสก์และสั่ง Resilver ทันทีหรือไม่? [y/N]: " CONFIRM
+if [[ ! "$CONFIRM" =~ ^[yY](es)?$ ]]; then
+    echo -e "\n${YELLOW}ยกเลิกการทำงาน ระบบไม่มีการเปลี่ยนแปลงใดๆ${NC}"
+    exit 0
+fi
+
+echo -e "\n${BOLD}${GREEN}==> กำลังเริ่มต้นดำเนินการ...${NC}"
+
+if [ $IS_BOOT_POOL -eq 1 ]; then
+    echo -e "1/6 ล้างโครงสร้างพาร์ติชันเดิมบน $NEW_DEV..."
+    sgdisk --zap-all "$NEW_DEV" >/dev/null
+
+    echo -e "2/6 โคลน Partition Table จาก $PEER_DEV ไปยัง $NEW_DEV..."
+    sgdisk --replicate="$NEW_DEV" "$PEER_DEV" >/dev/null
+    sgdisk --randomize-guids "$NEW_DEV" >/dev/null
+
+    echo -e "3/6 Format EFI System Partition (${NEW_DEV}2)..."
+    mkfs.vfat -F 32 "${NEW_DEV}2" >/dev/null
+    partprobe "$NEW_DEV" 2>/dev/null || udevadm settle
+
+    echo -e "4/6 ติดตั้ง Bootloader ผ่าน proxmox-boot-tool..."
+    proxmox-boot-tool init "${NEW_DEV}2"
+
+    echo -e "5/6 ค้นหา by-id partition 3..."
+    NEW_TARGET=$(get_part_by_id "$NEW_DNAME" "3")
+    if [ -z "$NEW_TARGET" ]; then
+        NEW_TARGET="${NEW_DEV}3"
+    fi
+    echo -e "     Target: ${GREEN}$NEW_TARGET${NC}"
+
+    echo -e "6/6 สั่ง zpool replace $POOL..."
+    zpool replace "$POOL" "$OLD_VDEV" "$NEW_TARGET"
+else
+    echo -e "1/2 ค้นหา by-id ของ $NEW_DEV..."
+    NEW_TARGET=$(get_disk_by_id "$NEW_DNAME")
+    [ -z "$NEW_TARGET" ] && NEW_TARGET="$NEW_DEV"
+    echo -e "     Target: ${GREEN}$NEW_TARGET${NC}"
+
+    echo -e "2/2 สั่ง zpool replace $POOL..."
+    zpool replace "$POOL" "$OLD_VDEV" "$NEW_TARGET"
+fi
+
+command -v ledctl >/dev/null 2>&1 && ledctl locate_off="$NEW_DEV" >/dev/null 2>&1 || true
+
+if [ -x /usr/local/bin/discord-send.sh ]; then
+    CONF="/etc/pve-discord.conf"
+    RES_WH=""
+    [ -f "$CONF" ] && . "$CONF" && RES_WH="${DISCORD_RESILVER_WEBHOOK_URL:-}"
+
+    /usr/local/bin/discord-send.sh \
+        ${RES_WH:+--webhook "$RES_WH"} \
+        --title "🔄 เริ่มต้น Resilver ดิสก์ใหม่บนเซิร์ฟเวอร์ $(hostname)" \
+        --desc "**แจ้งเตือน:** ดำเนินการเปลี่ยนดิสก์เข้า ZFS Pool สำเร็จ ระบบกำลังเริ่ม Resilver ข้อมูลเข้าสู่ลูกใหม่" \
+        --color blue \
+        --field "Host|$(hostname)|true" \
+        --field "Pool|$POOL|true" \
+        --field "Old Disk|$OLD_VDEV|false" \
+        --field "New Disk|$NEW_TARGET ($NEW_MODEL, S/N: $NEW_SERIAL)|false" >/dev/null 2>&1 || true
+fi
+
+echo -e "\n${BOLD}${GREEN}🎉 สำเร็จ! สั่งเริ่มการ Resilver เรียบร้อยแล้ว${NC}"
+echo -e "${BOLD}${CYAN}--------------------------------------------------------------${NC}"
+echo -e "${BOLD}สถานะพูลปัจจุบัน:${NC}"
+zpool status "$POOL"

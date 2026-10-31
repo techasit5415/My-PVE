@@ -1,5 +1,13 @@
-﻿# Central Discord Webhook Configuration for Proxmox VE
-# Copy this file to /etc/pve-discord.conf and insert your real Webhook URL
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+# Central Discord Webhook Configuration for Proxmox VE
+# Copy this file to /etc/pve-discord.conf and insert your real Webhook URLs and Tag
+DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_HEALTH_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+
+# Dedicated Webhook for SSH Root Login security alerts
+DISCORD_SSH_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_SSH_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+
+# Dedicated Webhook for ZFS Resilver (Rebuild) events and progress
+DISCORD_RESILVER_WEBHOOK_URL="https://discord.com/api/webhooks/YOUR_RESILVER_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+
 DISCORD_USERNAME="PVE-Monitor"
 DISCORD_AVATAR="https://avatars.githubusercontent.com/u/4925769?s=200&v=4"
+DISCORD_TAG="370422678009544714"
