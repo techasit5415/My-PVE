@@ -284,13 +284,16 @@ if [ $IS_BOOT_POOL -eq 1 ]; then
     echo -e "2/6 โคลน Partition Table จาก $PEER_DEV ไปยัง $NEW_DEV..."
     sgdisk --replicate="$NEW_DEV" "$PEER_DEV" >/dev/null
     sgdisk --randomize-guids "$NEW_DEV" >/dev/null
+    partprobe "$NEW_DEV" 2>/dev/null
+    udevadm settle --timeout=10 2>/dev/null || sleep 2
 
-    echo -e "3/6 Format EFI System Partition (${NEW_DEV}2)..."
-    mkfs.vfat -F 32 "${NEW_DEV}2" >/dev/null
-    partprobe "$NEW_DEV" 2>/dev/null || udevadm settle
+    echo -e "3/6 Format EFI System Partition ด้วย proxmox-boot-tool..."
+    proxmox-boot-tool format "${NEW_DEV}2" --force
+    udevadm settle --timeout=5 2>/dev/null || sleep 1
 
-    echo -e "4/6 ติดตั้ง Bootloader ผ่าน proxmox-boot-tool..."
+    echo -e "4/6 ติดตั้งและซิงก์ Bootloader ผ่าน proxmox-boot-tool..."
     proxmox-boot-tool init "${NEW_DEV}2"
+    proxmox-boot-tool clean 2>/dev/null || true
 
     echo -e "5/6 ค้นหา by-id partition 3..."
     NEW_TARGET=$(get_part_by_id "$NEW_DNAME" "3")
