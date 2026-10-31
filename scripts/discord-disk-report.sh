@@ -86,7 +86,7 @@ if has_nvme:
         f"Status:  {nvme_status} | Temp: {nvme_temp} | Errs: 0"
     )
 
-# 5. Hard Disks S.M.A.R.T. (Auto-detect SATA & SAS)
+# 5. Hard Disks S.M.A.R.T. (Auto-detect SATA & SAS + LED control)
 disks = []
 for line in run_cmd("lsblk -d -n -o NAME,TYPE").splitlines():
     parts = line.split()
@@ -102,6 +102,7 @@ hdd_lines = [
 ]
 any_hdd_fail = (has_nvme and nvme_status != "PASSED")
 any_hdd_warn = False
+failed_disks_details = []
 for d in disks:
     dev = f"/dev/{d}"
     h_out = run_cmd(f"smartctl -H {dev}")
@@ -131,10 +132,30 @@ for d in disks:
     if health == "PASSED" and bad_num > 0:
         health = "WARN"
 
-    if health == "ALERT":
-        any_hdd_fail = True
-    elif health == "WARN":
-        any_hdd_warn = True
+    if health in ["WARN", "ALERT"]:
+        if health == "ALERT":
+            any_hdd_fail = True
+        else:
+            any_hdd_warn = True
+        
+        # Extract Model, Serial, Size for faulty disks
+        model = run_cmd(f"lsblk -d -no MODEL {dev}")
+        serial = run_cmd(f"lsblk -d -no SERIAL {dev}")
+        size = run_cmd(f"lsblk -d -no SIZE {dev}")
+        if not model or not serial:
+            i_info = run_cmd(f"smartctl -i {dev}")
+            for iline in i_info.splitlines():
+                if any(k in iline for k in ["Device Model:", "Model Number:", "Product:"]):
+                    model = iline.split(":")[-1].strip()
+                elif "Serial Number:" in iline:
+                    serial = iline.split(":")[-1].strip()
+        failed_disks_details.append(f"• `/dev/{d}` ({size}): **{model or 'Unknown'}** | S/N: `{serial or 'Unknown'}` (Bad Sectors: {bad_val})")
+
+        # Turn ON Locate LED (blinking indicator)
+        run_cmd(f"ledctl locate=/dev/{d} >/dev/null 2>&1")
+    else:
+        # Turn OFF Locate LED
+        run_cmd(f"ledctl locate_off=/dev/{d} >/dev/null 2>&1")
 
     hdd_lines.append(f"{d:<6} {health:<8} {t_val:<6} {bad_val}")
 
@@ -215,6 +236,14 @@ if has_nvme and nvme_str:
 
 cmd.extend([
     "--field", "🔍 Hard Disks S.M.A.R.T.", f"```text\n{hdd_table}\n```", "false",
+])
+
+if failed_disks_details:
+    cmd.extend([
+        "--field", "⚠️ ข้อมูลดิสก์ที่มีปัญหา (Model & Serial Number สำหรับเปลี่ยน)", "\n".join(failed_disks_details), "false"
+    ])
+
+cmd.extend([
     "--field", "🗄️ ZFS Storage Pool", f"```text\n{zfs_str}\n```", "false",
     "--field", "🖥️ Virtual Machines (VM)", f"```text\n{vm_str}\n```", "true",
     "--field", "📦 Containers (LXC CT)", f"```text\n{ct_str}\n```", "true",

@@ -1,7 +1,8 @@
 #!/bin/bash
 # /usr/local/bin/pve-resource-monitor.sh
-# Threshold Monitoring for RAM (>90%) and Storage (>85%)
+# Resource & Disk Health Monitoring for Proxmox VE
 set -eo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 HOST=$(hostname)
 NOW=$(date +%s)
@@ -21,7 +22,6 @@ if [ "$RAM_PCT" -ge 90 ]; then
     echo "$COUNT" > "$RAM_COUNT_FILE"
 
     if [ "$COUNT" -ge 2 ]; then
-        # Check cooldown (2 hours = 7200 seconds)
         LAST_ALERT=0
         [ -f "$RAM_ALERT_FILE" ] && LAST_ALERT=$(cat "$RAM_ALERT_FILE")
         if [ $((NOW - LAST_ALERT)) -ge 7200 ]; then
@@ -41,7 +41,6 @@ if [ "$RAM_PCT" -ge 90 ]; then
         fi
     fi
 else
-    # Reset count if memory normalized below 85%
     if [ "$RAM_PCT" -lt 85 ]; then
         rm -f "$RAM_COUNT_FILE" "$RAM_ALERT_FILE"
     fi
@@ -141,6 +140,78 @@ if command -v zpool >/dev/null 2>&1; then
             fi
         fi
     done < <(zpool list -H -o name,cap 2>/dev/null || true)
+fi
+
+# ---------------- DISK S.M.A.R.T. & LED LOCATE CHECK ----------------
+if command -v smartctl >/dev/null 2>&1; then
+    for devpath in /dev/sd[a-z] /dev/sd[a-z][a-z]; do
+        [ -b "$devpath" ] || continue
+        d=$(basename "$devpath")
+
+        # 1. SMART Health Status
+        h_out=$(smartctl -H "$devpath" 2>/dev/null || true)
+        is_bad=0
+        if ! echo "$h_out" | grep -Eqi 'PASSED|OK'; then
+            is_bad=1
+        fi
+
+        # 2. Reallocated / Grown defect sectors
+        a_out=$(smartctl -A "$devpath" 2>/dev/null || true)
+        bad_cnt=0
+
+        # SATA: Reallocated_Sector_Ct
+        realloc=$(echo "$a_out" | awk '/Reallocated_Sector_Ct/{print $10}')
+        [ -n "$realloc" ] && [ "$realloc" -gt 0 ] 2>/dev/null && bad_cnt=$realloc
+
+        # SAS: Elements in grown defect list
+        grown=$(echo "$a_out" | awk -F: '/Elements in grown defect list/{gsub(/ /, "", $2); print $2}')
+        [ -n "$grown" ] && [ "$grown" -gt 0 ] 2>/dev/null && bad_cnt=$grown
+
+        # Current pending sectors
+        pending=$(echo "$a_out" | awk '/Current_Pending_Sector/{print $10}')
+        [ -n "$pending" ] && [ "$pending" -gt 0 ] 2>/dev/null && bad_cnt=$((bad_cnt + pending))
+
+        if [ "$is_bad" -eq 1 ] || [ "$bad_cnt" -gt 0 ]; then
+            # Turn ON Locate LED (Blinking indicator if supported)
+            command -v ledctl >/dev/null 2>&1 && ledctl locate="$devpath" >/dev/null 2>&1 || true
+
+            # Extract Model, Serial Number, Size
+            model=$(lsblk -d -no MODEL "$devpath" 2>/dev/null | xargs || true)
+            serial=$(lsblk -d -no SERIAL "$devpath" 2>/dev/null | xargs || true)
+            size=$(lsblk -d -no SIZE "$devpath" 2>/dev/null | xargs || true)
+            if [ -z "$model" ] || [ -z "$serial" ]; then
+                i_out=$(smartctl -i "$devpath" 2>/dev/null || true)
+                [ -z "$model" ] && model=$(echo "$i_out" | awk -F: '/Device Model|Model Number|Product/{print $2}' | head -n 1 | xargs || true)
+                [ -z "$serial" ] && serial=$(echo "$i_out" | awk -F: '/Serial Number/{print $2}' | head -n 1 | xargs || true)
+            fi
+
+            led_state="No LED backplane"
+            command -v ledctl >/dev/null 2>&1 && led_state="Blinking (locate=on)"
+
+            DISK_ALERT_FILE="/var/run/pve_disk_${d}_alert_time"
+            LAST_ALERT=0
+            [ -f "$DISK_ALERT_FILE" ] && LAST_ALERT=$(cat "$DISK_ALERT_FILE")
+            if [ $((NOW - LAST_ALERT)) -ge 43200 ]; then
+                /usr/local/bin/discord-send.sh \
+                    --tag \
+                    --title "🚨 Disk Failure/Warning: ตรวจพบความผิดปกติของดิสก์ ${d}" \
+                    --desc "**เซิร์ฟเวอร์:** \`${HOST}\` ตรวจพบ Bad Sector หรือความผิดปกติของดิสก์ กรุณาเตรียมเปลี่ยนดิสก์ลูกนี้" \
+                    --color red \
+                    --field "Host|${HOST}|true" \
+                    --field "Device|${devpath}|true" \
+                    --field "Model|${model:-Unknown}|true" \
+                    --field "Serial Number (S/N)|\`${serial:-Unknown}\`|true" \
+                    --field "Capacity|${size:-Unknown}|true" \
+                    --field "Bad/Pending Sectors|${bad_cnt}|true" \
+                    --field "Tray LED|${led_state}|true"
+                echo "$NOW" > "$DISK_ALERT_FILE"
+            fi
+        else
+            # Healthy: Turn OFF Locate LED
+            command -v ledctl >/dev/null 2>&1 && ledctl locate_off="$devpath" >/dev/null 2>&1 || true
+            rm -f "/var/run/pve_disk_${d}_alert_time"
+        fi
+    done
 fi
 
 exit 0
