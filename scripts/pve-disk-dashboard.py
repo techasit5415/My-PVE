@@ -121,10 +121,22 @@ def get_system_summary():
             "resilver": p_info.get("resilver")
         })
 
+    # Get active non-loopback IPv4 addresses
+    ip_addrs = []
+    ip_out = run_cmd(["ip", "-4", "-o", "addr", "show", "up"])
+    for line in ip_out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            addr = parts[3].split("/")[0]
+            if not addr.startswith("127.") and addr not in ip_addrs:
+                ip_addrs.append(addr)
+    ip_str = " / ".join(ip_addrs) if ip_addrs else "192.168.5.253 / 192.168.100.253"
+
     data = {
         "hostname": hostname,
         "uptime": uptime_raw,
         "motherboard": board_full,
+        "ip_str": ip_str,
         "pools": pool_summary,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
     }
@@ -207,6 +219,7 @@ def scan_disks():
         pending = 0
         uncorrectable = 0
         health_status = "HEALTHY"
+        poh_hours = None
 
         if smart_raw:
             try:
@@ -219,6 +232,11 @@ def scan_disks():
                     # Try nvme temperature
                     temp_c = sj.get("nvme_smart_health_information_log", {}).get("temperature")
 
+                # Power On Time
+                poh_hours = sj.get("power_on_time", {}).get("hours")
+                if poh_hours is None:
+                    poh_hours = sj.get("nvme_smart_health_information_log", {}).get("power_on_hours")
+
                 # ATA attributes
                 attrs = sj.get("ata_smart_attributes", {}).get("table", [])
                 for attr in attrs:
@@ -230,6 +248,8 @@ def scan_disks():
                         pending = raw_val
                     elif aid == 198:
                         uncorrectable = raw_val
+                    elif aid == 9 and poh_hours is None:
+                        poh_hours = raw_val
 
                 # NVMe media errors
                 nvme_log = sj.get("nvme_smart_health_information_log", {})
@@ -244,6 +264,19 @@ def scan_disks():
             health_status = "CRITICAL"
         elif total_bad > 0:
             health_status = "WARNING"
+
+        # Format Power-On Hours
+        poh_str = "N/A"
+        if poh_hours is not None:
+            poh_val = int(poh_hours)
+            days = poh_val // 24
+            if days >= 365:
+                years = days / 365.25
+                poh_str = f"{poh_val:,} ชม. ({years:.1f} ปี)"
+            elif days > 0:
+                poh_str = f"{poh_val:,} ชม. ({days} วัน)"
+            else:
+                poh_str = f"{poh_val:,} ชม."
 
         # Check if currently blinking
         is_blinking = False
@@ -277,6 +310,7 @@ def scan_disks():
             "order": order,
             "temp": f"{temp_c}°C" if temp_c is not None else "N/A",
             "temp_raw": temp_c or 0,
+            "power_on_hours": poh_str,
             "smart_passed": smart_passed,
             "health_status": health_status,
             "bad_sectors": {
@@ -691,7 +725,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <h1 id="host-title">PVE Disk & SATA Bay Visualizer</h1>
           <p>
             <span id="board-model">ASUSTeK PRIME A520M-K</span> • 
-            <span>Node IP: 192.168.100.253</span> • 
+            <span id="node-ip">IP: 192.168.5.253 / 192.168.100.253</span> • 
             <span id="sys-uptime">Uptime: ...</span>
           </p>
         </div>
@@ -745,6 +779,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <th>Model</th>
               <th>Serial Number (S/N)</th>
               <th>Capacity</th>
+              <th>Power-On Hours</th>
               <th>Temp</th>
               <th>Pool Role</th>
             </tr>
@@ -809,6 +844,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       document.getElementById('host-title').innerText = 'PVE Physical Disk Visualizer (' + sys.hostname + ')';
       document.getElementById('board-model').innerText = sys.motherboard;
+      document.getElementById('node-ip').innerText = 'IP: ' + (sys.ip_str || '192.168.5.253 / 192.168.100.253');
       document.getElementById('sys-uptime').innerText = 'Uptime: ' + sys.uptime;
       document.getElementById('last-updated').innerText = 'Updated: ' + sys.timestamp;
 
@@ -883,6 +919,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <td class="val">${d.size} (${d.type})</td>
               </tr>
               <tr>
+                <td class="label">Power-On Hours:</td>
+                <td class="val" style="color: #cbd5e1;">${d.power_on_hours}</td>
+              </tr>
+              <tr>
                 <td class="label">Temperature:</td>
                 <td class="val" style="color: ${d.temp_raw > 45 ? '#f59e0b' : '#34d399'};">${d.temp}</td>
               </tr>
@@ -915,6 +955,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <td>${d.model}</td>
           <td style="color: #38bdf8; font-weight: 700;">${d.serial}</td>
           <td>${d.size}</td>
+          <td style="color: #cbd5e1;">${d.power_on_hours}</td>
           <td>${d.temp}</td>
           <td style="color: #60a5fa;">${zfsRole}</td>
         `;
