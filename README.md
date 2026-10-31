@@ -153,6 +153,7 @@ My-PVE/
 │   ├── discord-send.sh                    # สคริปต์ส่ง Discord Embed กลาง รองรับ Tag User ID และแยก Webhook
 │   ├── discord-ssh-login.sh               # สคริปต์ตรวจจับและแจ้งเตือน SSH Root Login
 │   ├── discord-zed-resilver.sh            # สคริปต์ดักจับเหตุการณ์ ZFS Resilver Start / Finish จาก ZED
+│   ├── pve-disk-dashboard.py              # Web Dashboard จำลองเคส/พอร์ต SATA เมนบอร์ด + ปุ่ม Blink LED (Port 8088)
 │   ├── pve-disk-replace                   # เครื่องมือเปลี่ยนดิสก์ ZFS Pool กึ่งอัตโนมัติ (CLI)
 │   ├── pve-resource-monitor.sh            # สคริปต์มอนิเตอร์ Resource Over-limit และรายงาน Resilver Progress
 │   ├── pve-smart-test.sh                  # สคริปต์สั่งรัน SMART Self-Test บนดิสก์ทุกลูก
