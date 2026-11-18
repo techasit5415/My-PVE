@@ -169,14 +169,22 @@ if command -v smartctl >/dev/null 2>&1; then
             health_failed=1
         fi
 
-        l_out=$(smartctl -l selftest "$devpath" 2>/dev/null || true)
-        selftest_failed=0
-        if echo "$l_out" | grep -E '^\s*#\s*1\s+' | grep -Eqi 'read failure|FAILED|Completed:.*failure'; then
-            selftest_failed=1
-        fi
-
         # 2. SMART Attributes: Critical (ID 5, 197, 198, SAS Grown) & Warning (ID 199 CRC, ID 188 Timeout)
         a_out=$(smartctl -A "$devpath" 2>/dev/null || true)
+        poh=$(echo "$a_out" | awk '/Power_On_Hours/{print $10+0}' | head -n 1)
+        poh=${poh:-0}
+
+        l_out=$(smartctl -l selftest "$devpath" 2>/dev/null || true)
+        selftest_failed=0
+        st_line=$(echo "$l_out" | grep -E '^\s*#\s*1\s+' | head -n 1 || true)
+        if echo "$st_line" | grep -Eqi 'read failure|FAILED|Completed:.*failure'; then
+            st_hours=$(echo "$st_line" | awk '{for(i=1;i<=NF;i++) if($i ~ /%$/) {print $(i+1)+0; exit}}')
+            st_hours=${st_hours:-0}
+            # Only trigger if self-test failed within the last 48 Power-On Hours (ignore old historical tests)
+            if [ "$poh" -eq 0 ] || [ $((poh - st_hours)) -le 48 ]; then
+                selftest_failed=1
+            fi
+        fi
 
         realloc=$(echo "$a_out" | awk '/Reallocated_Sector_Ct/{print $10+0}' | head -n 1)
         realloc=${realloc:-0}
